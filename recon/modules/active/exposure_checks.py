@@ -132,7 +132,7 @@ _CHECKS: tuple[_Check, ...] = (
     _Check("backup.tar.gz", "backup", "high_value", _is_backup_file),
     _Check("www.zip", "backup", "high_value", _is_backup_file),
     _Check("dump.sql", "backup", "high_value", _is_backup_file),
-    _Check("heapdump", "actuator", "high_value", _reachable),
+    _Check("actuator/heapdump", "actuator", "high_value", _reachable),
 )
 
 
