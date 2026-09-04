@@ -23,6 +23,7 @@ from recon.models.audit import AuditLogEntry
 from recon.models.analysis import Analysis
 from recon.models.artifact import Artifact
 from recon.models.snapshot import AssetSnapshot, ScanDelta
+from recon.models.cve import CVERecord, CVEIndexMeta
 
 __all__ = [
     "Base",
@@ -40,6 +41,8 @@ __all__ = [
     "Artifact",
     "AssetSnapshot",
     "ScanDelta",
+    "CVERecord",
+    "CVEIndexMeta",
     "AssetType",
     "EngagementStatus",
     "FindingPolarity",
