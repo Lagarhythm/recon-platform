@@ -224,6 +224,9 @@ engagement:
   authorized_window:        # optional, but recommended
     start: <ISO-8601 datetime>
     end:   <ISO-8601 datetime>   # must be after start
+    enforce: warn | hard        # default warn. NOTE: `hard` is parsed but not yet
+                                # wired into the scan gate — out-of-window activity
+                                # is currently warned, not blocked (later wave).
 
 scope:                      # required UNLESS osint.enabled
   in_scope:

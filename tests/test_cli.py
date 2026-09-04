@@ -291,6 +291,23 @@ async def test_diff_needs_two_snapshots(engagement_id):
     assert out["snapshots"] == 0 and out["added"] == []
 
 
+async def test_diff_since_unknown_run_errors(engagement_id):
+    from recon.db import session_scope as ss
+    from recon.models.snapshot import AssetSnapshot
+    from recon.models.scanrun import ScanRun
+
+    async with ss() as s:
+        for sig in (["subdomain:a.example.com"], ["subdomain:a.example.com", "ip:1.2.3.4"]):
+            run = ScanRun(engagement_id=engagement_id, roe_config_snapshot={},
+                          roe_config_hash="h", modules_requested=[], modules_completed=[])
+            s.add(run)
+            await s.flush()
+            s.add(AssetSnapshot(engagement_id=engagement_id, scan_run_id=run.id,
+                                signature_set=sig, summary={}))
+    with pytest.raises(CliError):
+        await InProcessClient().diff(engagement_id, "no-such-run")
+
+
 async def test_cve_is_wave2(engagement_id):
     c = InProcessClient()
     assert (await c.cve_status())["available"] is False

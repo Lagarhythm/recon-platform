@@ -20,7 +20,7 @@ from recon.orchestrator.analyst import (
 )
 from recon.reporting.collect import build_report_data
 from recon.reporting.redaction import RedactionMode, redact_report
-from recon.reporting.render import render_html, render_json
+from recon.reporting.render import render_csv, render_html, render_json
 
 
 async def _seed(engagement_id):
@@ -100,6 +100,38 @@ async def test_html_and_json_render(engagement_id):
     assert "Reconnaissance Report" in html
     parsed = json.loads(render_json(d))
     assert parsed["summary"]["asset_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_csv_render_escapes_formula_injection(engagement_id):
+    """Attacker-influenced recon values (a subdomain label, an evidence summary)
+    must not execute as a spreadsheet formula in the client CSV deliverable."""
+    async with session_scope() as s:
+        s.add(Asset(
+            engagement_id=engagement_id, type=AssetType.SUBDOMAIN,
+            value="=cmd|'/c calc'!A1.example.com",
+            in_scope_status=ScopeStatus.FLAGGED, confidence_score=0.5,
+            interest_level=InterestLevel.NOTABLE,
+        ))
+    async with session_scope() as s:
+        a = (await s.execute(
+            select(Asset).where(Asset.value.like("=cmd%"))
+        )).scalar_one()
+        s.add(Evidence(
+            engagement_id=engagement_id, asset_id=a.id, source_module="dns",
+            subject_type="subdomain", subject_value=a.value,
+            summary="@SUM(1+1)*cmd", raw_data={},
+        ))
+
+    import csv as _csv
+    import io as _io
+
+    csv_text = render_csv(await _data(engagement_id))
+    rows = list(_csv.reader(_io.StringIO(csv_text)))
+    for row in rows[1:]:
+        for cell in row:
+            assert cell[:1] not in ("=", "+", "-", "@", "\t", "\r"), cell
+    assert "'=cmd|" in csv_text and "'@SUM(1+1)" in csv_text
 
 
 @pytest.mark.asyncio

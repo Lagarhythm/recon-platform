@@ -142,9 +142,27 @@ def render_json(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=2, sort_keys=False, default=str)
 
 
+# Leading char that makes a spreadsheet treat a cell as a formula. Recon data
+# is attacker-influenceable (a subdomain label, a `Server:` header, an evidence
+# summary lifted from a response), and the CSV is a client deliverable - so a
+# cell like ``=cmd|'/c calc'!A1`` must not execute when opened in Excel/Sheets.
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def _csv_safe(value: Any) -> str:
+    s = "" if value is None else str(value)
+    if s and s[0] in _CSV_FORMULA_LEAD:
+        return "'" + s
+    return s
+
+
 def render_csv(data: dict[str, Any]) -> str:
     """One row per asset - the flat view scripts and spreadsheets want. Findings
-    are assets too (``type == finding``), so they are included."""
+    are assets too (``type == finding``), so they are included.
+
+    Cells are formula-escaped (CSV injection defense): a value starting with a
+    spreadsheet formula lead is prefixed with an apostrophe.
+    """
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
@@ -157,15 +175,15 @@ def render_csv(data: dict[str, Any]) -> str:
             e.get("summary", "") for e in a.get("evidence", []) if e.get("summary")
         )
         writer.writerow([
-            a.get("type", ""),
-            a.get("value", ""),
-            a.get("confidence", ""),
-            a.get("interest", ""),
-            a.get("scope", ""),
-            a.get("first_seen", "") or "",
-            a.get("last_seen", "") or "",
-            ",".join(modules),
-            summaries,
+            _csv_safe(a.get("type", "")),
+            _csv_safe(a.get("value", "")),
+            _csv_safe(a.get("confidence", "")),
+            _csv_safe(a.get("interest", "")),
+            _csv_safe(a.get("scope", "")),
+            _csv_safe(a.get("first_seen", "") or ""),
+            _csv_safe(a.get("last_seen", "") or ""),
+            _csv_safe(",".join(modules)),
+            _csv_safe(summaries),
         ])
     return buf.getvalue()
 

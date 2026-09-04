@@ -426,7 +426,12 @@ class InProcessClient(ReconClient):
                 "added": [], "removed": [], "changed": [],
             }
         current = snaps[0]
-        base = next((s for s in snaps[1:] if s.scan_run_id == since), snaps[1]) if since else snaps[1]
+        if since:
+            base = next((s for s in snaps[1:] if s.scan_run_id == since), None)
+            if base is None:
+                raise CliError(f"no snapshot for --since run {since!r} on this engagement")
+        else:
+            base = snaps[1]
         cur, old = set(current.signature_set or []), set(base.signature_set or [])
         return {
             "engagement_id": engagement_id,

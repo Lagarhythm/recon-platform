@@ -157,6 +157,12 @@ def lint_roe(roe: RoEConfig) -> list[str]:
             )
     if roe.engagement.authorized_window is None:
         warnings.append("no authorized_window set - time-window checks will be skipped.")
+    elif roe.engagement.authorized_window.enforce.value == "hard":
+        warnings.append(
+            "authorized_window.enforce is 'hard' - this is PARSED but a hard "
+            "time-window block is not wired into the scan gate yet (later wave). "
+            "Out-of-window activity is currently WARNED, not blocked."
+        )
     if not roe.evasion.user_agents:
         warnings.append("no user_agents listed - active modules will use a single default UA.")
     if roe.osint.enabled:
