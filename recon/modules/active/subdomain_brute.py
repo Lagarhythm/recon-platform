@@ -23,7 +23,6 @@ import dns.resolver
 from recon.models.enums import ModulePhase
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
-from recon.net.rate_limit import RateLimiter
 
 _WORDLIST = Path(__file__).resolve().parents[2] / "data" / "wordlists" / "subdomains.txt"
 _RECORD_TYPES = ("A", "AAAA", "CNAME")
@@ -137,10 +136,12 @@ class SubdomainBruteModule(ReconModule):
             await ctx.progress("no apex domains in scope for subdomain brute-force")
             return
 
-        rps = max(1.0, float(ctx.roe.rate_limits.max_requests_per_second))
         concurrency = max(1, min(20, ctx.roe.rate_limits.max_concurrent_connections))
         sem = asyncio.Semaphore(concurrency)
-        limiter = RateLimiter(rps)  # one global token bucket for every DNS query
+        # Draw from the scan-run's single shared token bucket (injected into the
+        # context) so these DNS queries share the RoE budget with every HTTP
+        # request instead of spending it independently.
+        limiter = ctx.rate_limiter
 
         # Only brute-force names that are actually DNS zones. A host from an
         # /etc/hosts-style RoE entry (e.g. "homer.lan") has no SOA - brute-forcing

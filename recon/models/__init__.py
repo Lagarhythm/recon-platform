@@ -20,6 +20,8 @@ from recon.models.scanrun import ScanModuleRun, ScanRun
 from recon.models.evidence import Evidence
 from recon.models.audit import AuditLogEntry
 from recon.models.analysis import Analysis
+from recon.models.artifact import Artifact
+from recon.models.snapshot import AssetSnapshot
 
 __all__ = [
     "Base",
@@ -33,6 +35,8 @@ __all__ = [
     "Evidence",
     "AuditLogEntry",
     "Analysis",
+    "Artifact",
+    "AssetSnapshot",
     "AssetType",
     "EngagementStatus",
     "FindingPolarity",

@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     data_dir: Path = _PROJECT_ROOT / "data"
     database_url: str = ""  # derived from data_dir if empty
 
+    # --- Artifacts (Wave 0) -------------------------------------------
+    # Content-addressed blobs live under `artifacts_dir/<engagement_id>/`,
+    # referenced by `Artifact` rows. Per-engagement soft cap triggers a warning
+    # (PRD Section 9: artifact storage bounds).
+    artifacts_dir: Path = _PROJECT_ROOT / "data" / "artifacts"
+    artifact_soft_cap_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB per engagement
+
     # --- Auth / sessions ----------------------------------------------
     session_idle_timeout_minutes: int = 60
     session_cookie_name: str = "recon_session"
@@ -84,6 +91,7 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "reports").mkdir(exist_ok=True)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

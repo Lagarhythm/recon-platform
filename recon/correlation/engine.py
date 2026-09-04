@@ -159,24 +159,21 @@ def _confidence(distinct_sources: int) -> float:
 
 
 class CorrelationEngine:
+    #: batch size for streaming engagement evidence through correlation. A
+    #: large engagement's rows are consumed in these batches rather than
+    #: materialised all at once (PRD Section 9: correlation memory).
+    _EVIDENCE_CHUNK = 500
+
     async def correlate(
         self, session: AsyncSession, engagement: Engagement
     ) -> CorrelationSummary:
         scope = ScopeManager(_roe_of(engagement))
         summary = CorrelationSummary()
 
-        evidence = list(
-            (
-                await session.execute(
-                    select(Evidence).where(
-                        Evidence.engagement_id == engagement.id,
-                        Evidence.is_error.is_(False),
-                    )
-                )
-            ).scalars()
-        )
-        summary.evidence_processed = len(evidence)
-
+        # Phase A: stream every non-error evidence row in chunks and fold it
+        # into the grouping. Streaming (not a single ``.scalars().all()``) means
+        # the DB result is consumed in bounded batches instead of buffering the
+        # whole engagement in memory at once.
         # (type, canonical_value) -> list[Evidence]
         groups: dict[tuple[AssetType, str], list[Evidence]] = defaultdict(list)
         # canonical_value(host/url) -> list[attribute Evidence]
@@ -184,11 +181,9 @@ class CorrelationEngine:
         # explicit + derived relationship hints: (src_type, src_val, rel, tgt_type, tgt_val)
         rel_hints: set[tuple[str, str, str, str, str]] = set()
 
-        for ev in evidence:
-            try:
-                self._route_evidence(ev, groups, attributes, rel_hints, summary)
-            except Exception:  # one malformed row must not sink the whole graph
-                summary.skipped_evidence += 1
+        summary.evidence_processed = await self._collect_evidence(
+            session, engagement.id, groups, attributes, rel_hints, summary
+        )
 
         # resolved-IP map for scope classification of hostnames
         resolved: dict[str, list[str]] = defaultdict(list)
@@ -237,6 +232,42 @@ class CorrelationEngine:
 
         await session.flush()
         return summary
+
+    # --- evidence collection (streamed) ----------------------------
+    async def _collect_evidence(
+        self, session, engagement_id, groups, attributes, rel_hints, summary
+    ) -> int:  # noqa: ANN001
+        """Stream the engagement's non-error evidence in bounded batches and
+        route each row into the grouping. Returns the number of rows consumed.
+
+        Streaming is fully consumed before ``correlate`` issues any further DB
+        work (asset upserts), which is required on an AsyncSession.
+        """
+        stmt = (
+            select(Evidence)
+            .where(
+                Evidence.engagement_id == engagement_id,
+                Evidence.is_error.is_(False),
+            )
+            .order_by(Evidence.id)  # stable order for deterministic batching
+        )
+        processed = 0
+        # ``stream_scalars().yield_per(N)`` buffers the result in chunks from the
+        # driver instead of materialising the whole engagement into memory at
+        # once (SQLAlchemy async does not support the synchronous yield_per).
+        stream = await session.stream_scalars(
+            stmt.execution_options(yield_per=self._EVIDENCE_CHUNK)
+        )
+        try:
+            async for ev in stream:
+                processed += 1
+                try:
+                    self._route_evidence(ev, groups, attributes, rel_hints, summary)
+                except Exception:  # one malformed row must not sink the whole graph
+                    summary.skipped_evidence += 1
+        finally:
+            await stream.close()
+        return processed
 
     # --- evidence routing -----------------------------------------
     def _route_evidence(self, ev, groups, attributes, rel_hints, summary) -> None:  # noqa: ANN001

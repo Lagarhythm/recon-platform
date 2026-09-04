@@ -25,6 +25,7 @@ from recon.models.enums import FindingPolarity, ModulePhase, ScopeStatus
 from recon.models.evidence import Evidence
 from recon.models.scanrun import ScanModuleRun
 from recon.net.http_client import ReconHTTPClient
+from recon.net.rate_limit import RateLimiter
 
 ModulePhaseType = ModulePhase
 
@@ -60,6 +61,13 @@ class ModuleContext:
         is_cancelled: Callable[[], bool],
         allow_out_of_scope: bool = False,
         deadline: float | None = None,
+        #: The scan-run's *shared* token bucket. Non-HTTP outbound actions (a
+        #: DNS query, a raw TLS handshake) that a module rate-limits itself
+        #: MUST draw from this bucket so they share the RoE budget with every
+        #: HTTP request, instead of each module spending it independently.
+        #: ``None`` builds a private bucket sized from the RoE (test harness);
+        #: production always injects the orchestrator's single shared bucket.
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self.engagement = engagement
         self.roe = roe
@@ -69,6 +77,9 @@ class ModuleContext:
         self.http = http
         #: operator opted this run in to touching flagged/excluded targets
         self.allow_out_of_scope = allow_out_of_scope
+        self.rate_limiter = rate_limiter or RateLimiter(
+            roe.rate_limits.max_requests_per_second
+        )
         self._module_run = module_run
         self._session = session
         self._emit_event = emit_event

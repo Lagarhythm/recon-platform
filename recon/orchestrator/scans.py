@@ -34,6 +34,7 @@ from recon.modules.base import (
 )
 from recon.modules.registry import load_builtin_modules, resolve_order
 from recon.net.http_client import ReconHTTPClient
+from recon.net.rate_limit import RateLimiter
 from recon.orchestrator.events import event_bus
 from recon.orchestrator.killswitch import kill_switch
 
@@ -210,6 +211,10 @@ class ScanService:
             completed = set(run.modules_completed or [])
 
         scope = ScopeManager(roe)
+        # One shared token bucket per scan run: every module's HTTP traffic and
+        # its audited DNS actions draw from the same bucket, so concurrent
+        # activity on one engagement never spends the RoE budget twice.
+        rate_limiter = RateLimiter(roe.rate_limits.max_requests_per_second)
         http = ReconHTTPClient(
             roe=roe,
             scope=scope,
@@ -217,6 +222,7 @@ class ScanService:
             roe_config_hash=roe_hash,
             scan_run_id=scan_run_id,
             allow_out_of_scope=allow_oos,
+            rate_limiter=rate_limiter,
         )
         await event_bus.publish(scan_run_id, "scan_started", modules=[m.name for m in ordered])
 
@@ -246,7 +252,8 @@ class ScanService:
 
                 try:
                     await self._run_one_module(
-                        scan_run_id, mod, roe, scope, http, engagement_id, allow_oos
+                        scan_run_id, mod, roe, scope, http, engagement_id, allow_oos,
+                        rate_limiter=rate_limiter,
                     )
                 except ScanCancelled:
                     return  # _pause already recorded the state
@@ -259,7 +266,8 @@ class ScanService:
             await http.aclose()
 
     async def _run_one_module(
-        self, scan_run_id, mod, roe, scope, http, engagement_id, allow_oos=False
+        self, scan_run_id, mod, roe, scope, http, engagement_id, allow_oos=False,
+        *, rate_limiter: RateLimiter | None = None,
     ) -> None:  # noqa: ANN001
         await self._set_module_status(
             scan_run_id, mod.name, ModuleRunStatus.RUNNING, set_started=True
@@ -298,6 +306,7 @@ class ScanService:
                 is_cancelled=lambda: self._is_cancelled(scan_run_id),
                 allow_out_of_scope=allow_oos,
                 deadline=time.monotonic() + timeout_s,
+                rate_limiter=rate_limiter,
             )
             http.audit_context = ctx  # audit rows share the module's session
             try:

@@ -65,6 +65,12 @@ class ReconHTTPClient:
         allow_out_of_scope: bool = False,
         timeout: float = 15.0,
         verify_tls: bool = False,
+        #: The scan-run's *shared* token bucket. Every module's HTTP traffic and
+        #: its audited DNS actions draw from the same bucket so concurrent
+        #: activity on one engagement never spends the RoE budget more than once.
+        #: ``None`` builds a private bucket sized from the RoE (used by the
+        #: isolated test harness); production always injects the shared one.
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self._roe = roe
         self._scope = scope
@@ -73,7 +79,7 @@ class ReconHTTPClient:
         self._scan_run_id = scan_run_id
         self._allow_oos = allow_out_of_scope
 
-        self._rate = RateLimiter(roe.rate_limits.max_requests_per_second)
+        self._rate = rate_limiter or RateLimiter(roe.rate_limits.max_requests_per_second)
         self._backoff = BackoffController(roe.rate_limits.max_requests_per_second)
         self._sem = asyncio.Semaphore(roe.rate_limits.max_concurrent_connections)
         self._client = httpx.AsyncClient(
