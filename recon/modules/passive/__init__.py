@@ -4,6 +4,7 @@ from recon.modules.passive import (  # noqa: F401
     crawler,
     ct_subdomains,
     dns,
+    email_security,
     http_analyzer,
     internetdb,
     js_analyzer,

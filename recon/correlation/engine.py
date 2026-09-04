@@ -70,6 +70,14 @@ _ATTRIBUTE_TYPES = {
     # probe_http's per-host "answers HTTP / does not" verdict, attached to the
     # host asset named in raw_data["host"] - never a finding, never a new asset.
     "liveness",
+    # email_security's healthy-posture records, attached to the domain asset.
+    # A *weak* posture is its own subject_type (spf_weak/dmarc_weak) and falls
+    # through to the generic finding bucket instead, deliberately not listed here.
+    "spf",
+    "dmarc",
+    "dkim",
+    "mta_sts",
+    "tls_rpt",
 }
 
 import re as _re
@@ -95,6 +103,10 @@ _NEGATIVE_INTEREST = {
     "dmarc": InterestLevel.NOTABLE,
     "security_header": InterestLevel.NOTABLE,
     "caa": InterestLevel.INFORMATIONAL,
+    # MTA-STS / TLS-RPT are still uncommon even on well-run domains - absence
+    # is worth recording but not worth surfacing as loudly as no SPF/DMARC.
+    "mta_sts": InterestLevel.INFORMATIONAL,
+    "tls_rpt": InterestLevel.INFORMATIONAL,
 }
 
 
