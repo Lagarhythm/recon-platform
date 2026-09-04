@@ -86,6 +86,9 @@ class RelationshipType(str, enum.Enum):
     SERVES = "serves"
     #: a permuted / typo name is an alias of the origin name it was derived from
     ALIAS_OF = "alias_of"
+    #: a dangling subdomain is a takeover candidate for the third-party provider
+    #: its CNAME points at (PRD §11.5)
+    TAKEOVER_CANDIDATE = "takeover_candidate"
     # OSINT
     OWNS = "owns"
     EMPLOYED_BY = "employed_by"
