@@ -18,6 +18,13 @@ A module is a subclass of `recon.modules.base.ReconModule`, decorated with
 4. **Per-target failures use `ctx.add_error(...)` and keep going.** Only raise
    for a whole-module failure (bad config, dependency missing).
 5. Emit **negative evidence** for absent controls (`ctx.add_negative`).
+6. **Multi-source modules: continue on per-source failure, fail only on zero.**
+   A module that fans out over independent sources (`passive_subdomains`, and
+   `asn_expand` later) records each per-source failure as
+   `ctx.add_error(subject_value="<source>", ...)` and continues. It raises only
+   if **zero** sources returned any data. An explicit quota / rate-limit signal
+   (e.g. HackerTarget "API count exceeded", a 429) is a *degraded* outcome —
+   logged and skipped, never a crash.
 
 ## `ModuleContext` API
 

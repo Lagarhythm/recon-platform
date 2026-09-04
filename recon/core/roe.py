@@ -237,11 +237,18 @@ class TemplateSeverity(str, Enum):
 
 
 class PassiveSourcesPolicy(BaseModel):
-    """Per-source enable/disable. Default: every keyless source on."""
+    """`passive_subdomains` per-source controls. Default: the 8 keyless sources
+    on, the 3 low-value ones off (Honey's adapter table)."""
 
     disable: list[str] = Field(default_factory=list)
+    #: force a default-off source on (threatminer / commoncrawl / digitorus)
+    enable: list[str] = Field(default_factory=list)
+    #: hard cap per adapter call
+    per_source_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    #: module-wide ceiling; adapters not yet started past this are skipped
+    total_budget_seconds: float = Field(default=240.0, gt=0, le=3600)
 
-    @field_validator("disable")
+    @field_validator("disable", "enable")
     @classmethod
     def _clean(cls, v: list[str]) -> list[str]:
         return sorted({s.strip().lower() for s in v if s.strip()})

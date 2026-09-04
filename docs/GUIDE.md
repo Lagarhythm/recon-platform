@@ -261,8 +261,11 @@ osint:
 
 recon:                      # OPTIONAL — every key has a default; a v1 RoE with no
                             # `recon:` block loads unchanged.
-  passive_sources:
-    disable: [str]          # names of keyless passive sources to skip
+  passive_sources:                    # passive_subdomains fan-out controls
+    disable: [str]                     # source names to skip (e.g. ["hackertarget"])
+    enable:  [str]                     # force a default-off source on: threatminer|commoncrawl|digitorus
+    per_source_timeout_seconds: 30     # hard cap per source call
+    total_budget_seconds: 240          # module-wide ceiling; later sources skipped past this
   recursion:
     max_rounds: 2           # subdomain-recursion depth (0..5)
   permutation:
@@ -314,11 +317,13 @@ do" and the run continues.
 
 ### OSINT phase
 
-Needs `osint.enabled: true` with a `company`, `seed_domains`, and/or `github_org`.
+Most need `osint.enabled: true` with a `company`, `seed_domains`, and/or
+`github_org` (`passive_subdomains` also runs off plain `scope.in_scope.domains`).
 All calls are audited as `n/a` scope and rate-limited.
 
 | Module | Needs | What it does | Notes / gotchas |
 |---|---|---|---|
+| **`passive_subdomains`** | in-scope / seed domains | Fans out over **8 keyless passive sources on by default** — `crtsh`, `certspotter` (CT); `hackertarget`, `otx`, `rapiddns` (passive-DNS); `anubis`, `subdomain_center` (aggregator DBs); `wayback_cdx` (archive) — plus 3 shipped default-off (`threatminer`, `commoncrawl`, `digitorus`). One `subdomain`/`domain` evidence row **per source that saw the name**, so the confidence score rises with source agreement. Resolved IPs → `dns_record`. | Replaces crt.sh-only reliance. Per-source `try/except` + timeout: a dead source logs an error and the run continues; the module fails only if **zero** sources answered. `recon.passive_sources.disable` / `.enable` / `.per_source_timeout_seconds` / `.total_budget_seconds` tune it. `ct_subdomains` stays in place — the two dedupe. |
 | **`ct_org`** | seed_domains and/or company | crt.sh twice: by domain (→ subdomains) and by **organisation name** in the cert `O=` field (→ domains the company owns that you didn't know about). Emits `subdomain`, `domain`, `organization` + `owns`. | crt.sh is genuinely flaky — occasionally returns 0 rows. Just re-run. 12-min cap. |
 | **`rdap`** | seed_domains | RDAP/WHOIS per domain: registrant org, registrar, created/updated/expiry dates, status flags, nameservers. Then resolves the A record and reverse-RDAPs the IP → `netblock` (CIDR) + hosting org. | `.org` via PIR is slow (45 s timeout per domain). Flags expiry < 30 days and hold/pendingDelete states as findings. |
 | **`github_org`** | `github_org` slug (strongly preferred), or company + seed_domains | Resolves the GitHub account (User *or* Org), enumerates public repos (language, topics, activity, homepage) → `repository` + one org-level `tech_stack` finding. For a real Org, also public members → `person` + `employed_by`. | **Pin `osint.github_org`.** Name search is unreliable: GitHub's relevance ranking often doesn't surface the right account, and a common company name collides with unrelated look-alike orgs. A name-only match is *rejected* whenever seed_domains are set and none corroborate (blog host / email / bio must reference a seed domain). Set `RECON_OSINT_GITHUB_TOKEN` to raise the API limit 60→5000/hr. |
