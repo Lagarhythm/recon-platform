@@ -158,6 +158,19 @@ def _confidence(distinct_sources: int) -> float:
     return min(1.0, 0.5 + 0.25 * (distinct_sources - 1))
 
 
+def _distinct_sources(evs: list[Evidence]) -> int:
+    """How many *independent* sources corroborate this asset.
+
+    Keyed on ``(source_module, raw_data["source"])`` — not just ``source_module``
+    — so an aggregator module like ``passive_subdomains`` that hears the same
+    name from crt.sh + OTX + Wayback counts as three sources, not one (PRD v2.1
+    §5, Fizz call #1). A module that sets no ``raw_data["source"]`` collapses to
+    ``(module, None)`` exactly as before, so single-source modules are
+    unchanged.
+    """
+    return len({(e.source_module, (e.raw_data or {}).get("source")) for e in evs})
+
+
 class CorrelationEngine:
     #: batch size for streaming engagement evidence through correlation. A
     #: large engagement's rows are consumed in these batches rather than
@@ -364,8 +377,7 @@ class CorrelationEngine:
             )
         ).scalar_one_or_none()
 
-        distinct_sources = len({e.source_module for e in evs}) if evs else 0
-        confidence = _confidence(distinct_sources) if evs else 0.3
+        confidence = _confidence(_distinct_sources(evs)) if evs else 0.3
         interest = self._interest(atype, value, evs)
         scope_status = self._classify(atype, value, scope, resolved)
         times = [e.discovered_at for e in evs if e.discovered_at]

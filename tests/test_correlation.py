@@ -84,6 +84,42 @@ async def test_confidence_rises_with_independent_sources(engagement_id):
 
 
 @pytest.mark.asyncio
+async def test_confidence_counts_distinct_raw_data_source_within_one_module(engagement_id):
+    """One aggregator module (e.g. passive_subdomains) that hears a name from
+    several passive sources must count each source (PRD v2.1 §5)."""
+    await _add_evidence(engagement_id, module="passive_subdomains", subject_type="subdomain",
+                        subject_value="api.example.com", raw_data={"source": "crt.sh"})
+    await _correlate(engagement_id)
+    one = (await _assets(engagement_id, AssetType.SUBDOMAIN))[0].confidence_score
+
+    # same module, a *different* source -> confidence rises
+    await _add_evidence(engagement_id, module="passive_subdomains", subject_type="subdomain",
+                        subject_value="api.example.com", raw_data={"source": "otx"})
+    await _correlate(engagement_id)
+    two = (await _assets(engagement_id, AssetType.SUBDOMAIN))[0].confidence_score
+    assert two > one
+
+    # same module, a source already counted -> no change
+    await _add_evidence(engagement_id, module="passive_subdomains", subject_type="subdomain",
+                        subject_value="api.example.com", raw_data={"source": "crt.sh"})
+    await _correlate(engagement_id)
+    three = (await _assets(engagement_id, AssetType.SUBDOMAIN))[0].confidence_score
+    assert three == two
+
+
+@pytest.mark.asyncio
+async def test_confidence_unchanged_for_sourceless_single_module(engagement_id):
+    """A module that sets no raw_data['source'] (every v1 module) is unaffected:
+    N sourceless evidence rows from one module still collapse to one source."""
+    for _ in range(4):
+        await _add_evidence(engagement_id, module="ct", subject_type="subdomain",
+                            subject_value="www.example.com", raw_data={})
+    await _correlate(engagement_id)
+    a = (await _assets(engagement_id, AssetType.SUBDOMAIN))[0]
+    assert a.confidence_score == 0.5  # floor - one distinct source
+
+
+@pytest.mark.asyncio
 async def test_negative_evidence_becomes_finding(engagement_id):
     await _add_evidence(
         engagement_id, module="dns", subject_type="dnssec",

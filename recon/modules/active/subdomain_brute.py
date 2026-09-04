@@ -13,19 +13,18 @@ finding and skip brute-forcing that apex entirely.
 from __future__ import annotations
 
 import asyncio
-import secrets
 from pathlib import Path
 
 import dns.asyncresolver
-import dns.exception
-import dns.resolver
 
 from recon.models.enums import ModulePhase
+from recon.modules._dns_common import is_zone as _is_zone
+from recon.modules._dns_common import resolve_records as _resolve_label
+from recon.modules._dns_common import wildcard_answers
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 
 _WORDLIST = Path(__file__).resolve().parents[2] / "data" / "wordlists" / "subdomains.txt"
-_RECORD_TYPES = ("A", "AAAA", "CNAME")
 
 
 def _base_domains(patterns: list[str]) -> list[str]:
@@ -33,24 +32,6 @@ def _base_domains(patterns: list[str]) -> list[str]:
     for p in patterns:
         out.add(p[2:] if p.startswith("*.") else p)
     return sorted(out)
-
-
-async def _is_zone(resolver, name: str, limiter=None) -> bool:  # noqa: ANN001
-    """True if ``name`` looks like a real DNS zone (has an SOA or NS record).
-
-    Like every other lookup in this module, each query is gated through the
-    shared ``limiter``.
-    """
-    for rtype in ("SOA", "NS"):
-        if limiter is not None:
-            await limiter.acquire()
-        try:
-            answer = await resolver.resolve(name, rtype, raise_on_no_answer=False)
-        except (dns.resolver.NXDOMAIN, dns.resolver.NoNameservers, dns.exception.DNSException):
-            continue
-        if getattr(answer, "rrset", None):
-            return True
-    return False
 
 
 def _load_labels(path: Path = _WORDLIST) -> list[str]:
@@ -67,37 +48,6 @@ def _load_labels(path: Path = _WORDLIST) -> list[str]:
         seen.add(label)
         labels.append(label)
     return labels
-
-
-async def _resolve_label(resolver, fqdn: str, limiter=None) -> list[dict]:  # noqa: ANN001
-    """Return dns_record dicts for a name, or [] if it does not resolve.
-
-    Every individual DNS query goes through ``limiter`` so the module cannot
-    exceed the RoE's request rate (3 record types == 3 queries per label).
-    """
-    found: list[dict] = []
-    for rtype in _RECORD_TYPES:
-        if limiter is not None:
-            await limiter.acquire()
-        try:
-            answer = await resolver.resolve(fqdn, rtype, raise_on_no_answer=False)
-        except dns.resolver.NXDOMAIN:
-            return []
-        except dns.exception.DNSException:
-            continue
-        rrset = getattr(answer, "rrset", None)
-        if not rrset:
-            continue
-        for rd in rrset:
-            found.append(
-                {
-                    "name": fqdn,
-                    "rtype": rtype,
-                    "value": rd.to_text(),
-                    "ttl": getattr(rrset, "ttl", None),
-                }
-            )
-    return found
 
 
 @register
@@ -169,18 +119,16 @@ class SubdomainBruteModule(ReconModule):
             ctx.check_alive()
             await self._brute_apex(ctx, resolver, apex, labels, sem, concurrency, limiter)
 
-    async def _has_wildcard(self, resolver, apex: str, limiter=None) -> bool:  # noqa: ANN001
-        probe = f"{secrets.token_hex(6)}.{apex}"  # 12 random hex chars
-        return bool(await _resolve_label(resolver, probe, limiter))
-
     async def _brute_apex(  # noqa: ANN001, PLR0913
         self, ctx: ModuleContext, resolver, apex: str, labels, sem, concurrency, limiter
     ) -> None:
-        if await self._has_wildcard(resolver, apex, limiter):
+        wildcard = await wildcard_answers(resolver, apex, limiter)
+        if wildcard:
             await ctx.add_evidence(
                 subject_type="dns_wildcard",
                 subject_value=apex,
-                raw_data={"apex": apex, "interest": "notable"},
+                raw_data={"apex": apex, "interest": "notable",
+                          "wildcard_answers": sorted(wildcard)},
                 summary=(
                     f"wildcard DNS detected for {apex}; brute-force results "
                     "unreliable, brute-force skipped"
