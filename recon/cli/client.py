@@ -465,19 +465,53 @@ class InProcessClient(ReconClient):
                 "next_steps": list(analysis.next_steps or []),
             }
 
-    # --- cve (index is Wave 2) ---------------------------------
+    # --- cve -----------------------------------------------------
     async def cve_status(self) -> dict:
-        return {
-            "available": False,
-            "note": "the local CVE index (CVERecord / CVEIndexMeta) and "
-                    "cve_correlate land in Wave 2; nothing to report yet.",
-        }
+        from sqlalchemy import func, select
+
+        from recon.db import session_scope
+        from recon.models.cve import CVEIndexMeta, CVERecord
+
+        async with session_scope() as session:
+            meta = await session.get(CVEIndexMeta, "singleton")
+            kev_count = (
+                await session.execute(
+                    select(func.count()).select_from(CVERecord)
+                    .where(CVERecord.in_kev.is_(True))
+                )
+            ).scalar_one()
+            if meta is None:
+                return {
+                    "available": False,
+                    "note": "no CVE index yet - run `recon cve refresh`.",
+                    "kev_count": kev_count,
+                }
+            return {
+                "available": True,
+                "source": meta.source,
+                "last_refreshed": _iso(meta.last_refreshed),
+                "record_count": meta.record_count,
+                "kev_count": kev_count,
+                "feed_version": meta.feed_version,
+            }
 
     async def cve_refresh(self, source: str | None) -> dict:
-        raise CliError(
-            "cve refresh is unavailable until the CVE index ships in Wave 2.",
-            EXIT_USER_ERROR,
-        )
+        from recon.db import session_scope
+        from recon.orchestrator.cve_index import CVEIndexError, refresh_index
+
+        try:
+            async with session_scope() as session:
+                meta = await refresh_index(session, source=source or "local")
+                await session.flush()
+                out = {
+                    "source": meta.source,
+                    "last_refreshed": _iso(meta.last_refreshed),
+                    "record_count": meta.record_count,
+                    "feed_version": meta.feed_version,
+                }
+        except CVEIndexError as exc:
+            raise CliError(f"cve refresh failed: {exc}", EXIT_USER_ERROR) from exc
+        return out
 
     # --- tokens ------------------------------------------------
     async def token_create(self, name: str) -> dict:
