@@ -264,7 +264,7 @@ recon:                      # OPTIONAL — every key has a default; a v1 RoE wit
   passive_sources:                    # passive_subdomains fan-out controls
     disable: [str]                     # source names to skip (e.g. ["hackertarget"])
     enable:  [str]                     # force a default-off source on: threatminer|commoncrawl|digitorus
-    per_source_timeout_seconds: 30     # hard cap per source call
+    per_source_timeout_seconds: 45     # hard cap per source call
     total_budget_seconds: 240          # module-wide ceiling; later sources skipped past this
   recursion:
     max_rounds: 2           # subdomain-recursion depth (0..5)

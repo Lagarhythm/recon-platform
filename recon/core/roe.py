@@ -243,8 +243,9 @@ class PassiveSourcesPolicy(BaseModel):
     disable: list[str] = Field(default_factory=list)
     #: force a default-off source on (threatminer / commoncrawl / digitorus)
     enable: list[str] = Field(default_factory=list)
-    #: hard cap per adapter call
-    per_source_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    #: hard cap per adapter call (crt.sh routinely needs 30-60s; commoncrawl
+    #: more, but it is default-off and its user should raise this)
+    per_source_timeout_seconds: float = Field(default=45.0, gt=0, le=300)
     #: module-wide ceiling; adapters not yet started past this are skipped
     total_budget_seconds: float = Field(default=240.0, gt=0, le=3600)
 

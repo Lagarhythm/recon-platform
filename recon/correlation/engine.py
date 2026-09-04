@@ -67,6 +67,9 @@ _ATTRIBUTE_TYPES = {
     "http_method",
     "redirect",
     "title",
+    # probe_http's per-host "answers HTTP / does not" verdict, attached to the
+    # host asset named in raw_data["host"] - never a finding, never a new asset.
+    "liveness",
 }
 
 import re as _re

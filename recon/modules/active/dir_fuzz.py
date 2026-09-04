@@ -30,6 +30,7 @@ def _safe_root(url: str) -> bool:
 
 from recon.config import get_settings
 from recon.models.enums import ModulePhase, ScopeStatus
+from recon.modules._live_hosts import probed_hosts
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 from recon.net.external import find_binary, run_command
@@ -44,7 +45,7 @@ _SOFT404_CLUSTER = 12
 class DirFuzzModule(ReconModule):
     name = "dir_fuzz"
     phase = ModulePhase.ACTIVE
-    depends_on = ("http_analyzer",)
+    depends_on = ("http_analyzer", "probe_http")
     description = "ffuf: content discovery on in-scope web roots with soft-404 filtering"
     requires_binary = "ffuf"
 
@@ -94,9 +95,15 @@ class DirFuzzModule(ReconModule):
                 roots.add(f"{parts.scheme}://{parts.netloc}/")
         # Only guess https:// for a host we have no confirmed root for - fuzzing
         # a full wordlist against a dead scheme is ~40 min of connection errors.
+        # And if probe_http assessed a host but produced no live URL for it, the
+        # host is dead over HTTP - never guess a root for it.
         covered = {urlsplit(r).netloc for r in roots}
+        # probe_http already tried every host it knew: a live one is in `covered`
+        # (it has a url asset), a probed-but-silent one is dead - either way,
+        # no guess needed. Only hosts probe_http never saw fall through here.
+        probe_checked = await probed_hosts(ctx)
         for host in await ctx.known_assets("subdomain", "domain", in_scope_only=not oos):
-            if host not in covered:
+            if host not in covered and host not in probe_checked:
                 roots.add(f"https://{host}/")
         return {
             r for r in roots

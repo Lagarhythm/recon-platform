@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urldefrag, urljoin, urlsplit
 from bs4 import BeautifulSoup
 
 from recon.models.enums import ModulePhase
+from recon.modules._live_hosts import probed_hosts
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 from recon.net.http_client import ReconRequestError, ScopeViolation
@@ -51,7 +52,7 @@ def _is_http(url: str) -> bool:
 class CrawlerModule(ReconModule):
     name = "crawler"
     phase = ModulePhase.PASSIVE
-    depends_on = ("http_analyzer",)
+    depends_on = ("http_analyzer", "probe_http")
     description = "BFS-crawl in-scope web hosts for URLs, forms, scripts, robots/sitemap"
 
     async def run(self, ctx: ModuleContext) -> None:
@@ -73,14 +74,17 @@ class CrawlerModule(ReconModule):
             if h and h.strip()
         }
         hosts.update(h.strip().lower().rstrip(".") for h in ctx.roe.scope.in_scope.hosts)
+        # If probe_http ran, it already told us which hosts answer HTTP - those
+        # are seeded above via their `url` evidence, and a host it probed but
+        # that stayed silent is dead, so skip the speculative scheme guesses for
+        # it. Hosts probe_http never saw (or a scan without probe_http) still get
+        # both-scheme guesses - the fallback path.
+        live_checked = await probed_hosts(ctx)
         # Seed both schemes: an internal service may serve only HTTP. The dead
         # scheme costs one fast connection error, not a 15s-per-request stall
         # (which is what hard-coding https:// here used to cause on a LAN).
-        # `known_values("url")` seeds (added first, above) already carry the
-        # scheme http_analyzer confirmed, so they sit ahead of these guesses in
-        # the queue and their host reaches `_host_meta` on the working scheme.
         for h in sorted(hosts):
-            if h:
+            if h and h not in live_checked:
                 _add_seed(f"https://{h}/")
                 _add_seed(f"http://{h}/")
 

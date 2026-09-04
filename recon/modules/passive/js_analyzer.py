@@ -13,6 +13,7 @@ import re
 from collections import Counter
 
 from recon.models.enums import ModulePhase
+from recon.modules._live_hosts import _host_of, live_hosts
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 from recon.net.http_client import ReconRequestError, ScopeViolation
@@ -221,7 +222,7 @@ class _FileFindings:
 class JSAnalyzerModule(ReconModule):
     name = "js_analyzer"
     phase = ModulePhase.PASSIVE
-    depends_on = ("crawler",)
+    depends_on = ("crawler", "probe_http")
     description = "Parse crawled JS for endpoints, params, tech, and leaked secrets"
 
     async def run(self, ctx: ModuleContext) -> None:
@@ -262,13 +263,20 @@ class JSAnalyzerModule(ReconModule):
                 seen_urls.add(url)
                 targets.append((url, None))
 
+        # `.js` URLs picked up from `known_values("url")` (e.g. a wayback hit)
+        # may point at a host that is no longer up. If probe_http ran, only keep
+        # the ones on a host it confirmed answers HTTP; otherwise keep them all.
+        live = await live_hosts(ctx)
         for url in await ctx.known_values("url"):
             if not url:
                 continue
             path = url.split("?", 1)[0].split("#", 1)[0].lower()
-            if path.endswith((".js", ".mjs")) and url not in seen_urls:
-                seen_urls.add(url)
-                targets.append((url, None))
+            if not path.endswith((".js", ".mjs")) or url in seen_urls:
+                continue
+            if live and _host_of(url) not in live:
+                continue
+            seen_urls.add(url)
+            targets.append((url, None))
 
         seen_inline: set[tuple[str, str]] = set()
         for ev in await ctx.known_evidence("inline_js"):

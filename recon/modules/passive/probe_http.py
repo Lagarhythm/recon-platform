@@ -87,6 +87,7 @@ class ProbeHTTPModule(ReconModule):
             )
 
     async def _probe_host(self, ctx: ModuleContext, host: str) -> None:
+        answered = False
         for scheme in _SCHEMES:
             url = f"{scheme}://{host}/"
             try:
@@ -105,6 +106,7 @@ class ProbeHTTPModule(ReconModule):
                     )
                 continue  # try the other scheme
 
+            answered = True
             try:
                 final_url = str(resp.url)
             except RuntimeError:  # response built without a request (test doubles)
@@ -164,7 +166,18 @@ class ProbeHTTPModule(ReconModule):
             # https answered - the canonical live endpoint is found, don't also
             # spend a request probing http:// for the same host.
             if scheme == "https":
-                return
+                break
+
+        # One `liveness` attribute per host probe_http checked (attaches to the
+        # host asset, never a finding). Downstream modules (crawler, dir_fuzz,
+        # js_analyzer) read it to seed from confirmed-live hosts and skip the
+        # ones probe_http found dead, instead of each re-probing everything.
+        await ctx.add_evidence(
+            subject_type="liveness",
+            subject_value=host,
+            raw_data={"source": "probe_http", "host": host, "live": answered},
+            summary=f"{host} {'answers' if answered else 'does not answer'} HTTP(S)",
+        )
 
 
 def _looks_like_ip(host: str) -> bool:

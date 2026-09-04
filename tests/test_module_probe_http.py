@@ -115,14 +115,26 @@ async def test_redirect_target_recorded(engagement_id):
 
 
 @pytest.mark.asyncio
-async def test_dead_host_produces_nothing_and_no_error_spam(engagement_id):
+async def test_dead_host_records_a_liveness_verdict_no_url_no_service(engagement_id):
     routes = {
         "https://api.example.com/": ReconRequestError("no route"),
         "http://api.example.com/": ReconRequestError("no route"),
     }
     await _run(engagement_id, routes, _prior_hosts(_HOST))
     assert await evidence_for(engagement_id, subject_type="url") == []
+    assert await evidence_for(engagement_id, subject_type="service") == []
+    live = await evidence_for(engagement_id, subject_type="liveness")
+    assert len(live) == 1
+    assert live[0].raw_data["live"] is False and live[0].raw_data["host"] == _HOST
     assert [e for e in await evidence_for(engagement_id) if e.is_error] == []
+
+
+@pytest.mark.asyncio
+async def test_live_host_also_records_a_liveness_verdict(engagement_id):
+    routes = {"https://api.example.com/": _resp(200, url="https://api.example.com/")}
+    await _run(engagement_id, routes, _prior_hosts(_HOST))
+    live = await evidence_for(engagement_id, subject_type="liveness")
+    assert len(live) == 1 and live[0].raw_data["live"] is True
 
 
 @pytest.mark.asyncio
