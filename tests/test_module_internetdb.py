@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from recon.modules.osint.internetdb import InternetDBModule
+from recon.modules.passive.internetdb import InternetDBModule
 from tests.harness import FakeHTTP, evidence_for, module_harness
 
 _IP = "203.0.113.10"          # inside EXAMPLE_ROE in_scope 203.0.113.0/24

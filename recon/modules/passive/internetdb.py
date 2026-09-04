@@ -1,10 +1,14 @@
-"""Shodan InternetDB (OSINT).
+"""Shodan InternetDB (passive).
 
 ``https://internetdb.shodan.io/<ipv4>`` is completely keyless - no account, no
 token. One GET per in-scope resolved IPv4 returns the open ports, CPEs,
 hostnames, tags and **known CVEs** that Shodan already computed from its own
 periodic internet-wide scan. **Zero packets reach the target** - this is a
 lookup against Shodan's dataset, audited as a third-party ``n/a`` call.
+
+Lives in the *passive* phase, not OSINT: OSINT runs first, before any target
+resolution, and this module needs ``dns``'s resolved IPs. It is still purely a
+third-party lookup - phase here is about ordering + checkpoint placement.
 
 Feeds ``cve_correlate`` (Wave 2) for free via the ``service`` + ``cve``
 evidence it emits.
@@ -25,7 +29,7 @@ _SOURCE = "internetdb"
 @register
 class InternetDBModule(ReconModule):
     name = "internetdb"
-    phase = ModulePhase.OSINT
+    phase = ModulePhase.PASSIVE
     depends_on = ("dns",)
     description = "Shodan InternetDB: keyless open ports / CPEs / CVEs per resolved IP"
     max_runtime_seconds = 10 * 60

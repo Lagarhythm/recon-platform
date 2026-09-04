@@ -54,14 +54,13 @@ class ProbeHTTPModule(ReconModule):
         })
         # Never probe an EXCLUDED host; FLAGGED only with an override (the HTTP
         # client enforces this too, but skipping up front avoids the audit noise).
-        targets = [
-            h for h in hosts
-            if ctx.scope.classify(h).status is not ScopeStatus.EXCLUDED
-            and not (
-                ctx.scope.classify(h).status is ScopeStatus.FLAGGED
-                and not ctx.allow_out_of_scope
-            )
-        ]
+        def _probeable(host: str) -> bool:
+            status = ctx.scope.classify(host).status
+            if status is ScopeStatus.EXCLUDED:
+                return False
+            return not (status is ScopeStatus.FLAGGED and not ctx.allow_out_of_scope)
+
+        targets = [h for h in hosts if _probeable(h)]
         if not targets:
             await ctx.progress("probe_http: no in-scope hosts discovered yet")
             return

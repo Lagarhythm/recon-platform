@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from recon.models.enums import ModulePhase
+from recon.models.enums import MODULE_PHASE_RANK, ModulePhase
 from recon.modules.base import ModuleContext, ReconModule
-from recon.modules.registry import MODULES, resolve_order
+from recon.modules.registry import MODULES, load_builtin_modules, resolve_order
 
 
 def _mk(name, phase, deps=()):
@@ -50,3 +50,32 @@ def test_depending_on_a_later_phase_is_rejected(fakes):
             resolve_order(["t_bad"])
     finally:
         MODULES.pop("t_bad", None)
+
+
+def test_every_real_module_resolves_and_respects_phase_ranking():
+    """resolve_order over the *actual* registered module set - catches a module
+    that declares a dependency in a later phase (which the synthetic fixtures
+    above cannot). This class of bug must fail here, not at scan time."""
+    load_builtin_modules()
+    names = sorted(MODULES)
+    assert names, "no modules registered"
+
+    # every dependency edge points to the same or an earlier phase
+    for name in names:
+        for dep in MODULES[name].depends_on:
+            if dep not in MODULES:
+                continue
+            assert MODULE_PHASE_RANK[MODULES[dep].phase] <= MODULE_PHASE_RANK[MODULES[name].phase], (
+                f"{name} ({MODULES[name].phase.value}) depends on "
+                f"{dep} ({MODULES[dep].phase.value}) - a later phase"
+            )
+
+    # the whole set resolves, and the result is phase-ordered
+    ordered = resolve_order(names)
+    ranks = [MODULE_PHASE_RANK[m.phase] for m in ordered]
+    assert ranks == sorted(ranks)
+    assert {m.name for m in ordered} == set(names)
+
+    # and each module resolves on its own (pulls its deps, no phase violation)
+    for name in names:
+        resolve_order([name])

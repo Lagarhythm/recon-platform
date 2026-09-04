@@ -5,6 +5,7 @@ from recon.modules.passive import (  # noqa: F401
     ct_subdomains,
     dns,
     http_analyzer,
+    internetdb,
     js_analyzer,
     probe_http,
 )
