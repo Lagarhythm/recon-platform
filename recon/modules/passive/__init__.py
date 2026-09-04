@@ -12,4 +12,5 @@ from recon.modules.passive import (  # noqa: F401
     subdomain_permute,
     subdomain_recurse,
     subdomain_takeover,
+    tech_fingerprint,
 )
