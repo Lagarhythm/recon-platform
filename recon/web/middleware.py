@@ -13,7 +13,7 @@ from recon.orchestrator.auth import AuthService
 from recon.web.csrf import CSRF_COOKIE
 from recon.config import get_settings
 
-_SAFE_PREFIXES = ("/static", "/health", "/favicon.ico")
+_SAFE_PREFIXES = ("/static", "/health", "/favicon.ico", "/api/")
 
 
 class SetupGateMiddleware(BaseHTTPMiddleware):

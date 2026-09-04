@@ -29,13 +29,19 @@ class EngagementNotFound(EngagementError):
 
 class EngagementService:
     async def create(
-        self, session: AsyncSession, raw_yaml: str
+        self, session: AsyncSession, raw_yaml: str, *, name_override: str | None = None
     ) -> tuple[Engagement, list[str]]:
-        """Create an engagement from an RoE document. Returns (engagement, advisories)."""
+        """Create an engagement from an RoE document. Returns (engagement, advisories).
+
+        ``name_override`` sets the engagement's display name without touching the
+        RoE document itself (the RoE's ``engagement.name`` stays canonical and
+        the stored YAML/hash are unchanged).
+        """
         config, roe_hash = load_roe(raw_yaml)
         window = config.engagement.authorized_window
+        display_name = (name_override or "").strip() or config.engagement.name
         engagement = Engagement(
-            name=config.engagement.name,
+            name=display_name,
             client_name=config.engagement.client,
             roe_config_yaml=raw_yaml,
             roe_config=config.model_dump(mode="json"),

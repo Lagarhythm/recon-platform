@@ -35,6 +35,21 @@ class AuthService:
         count = (await session.execute(select(func.count()).select_from(User))).scalar_one()
         return int(count) == 0
 
+    async def maybe_bootstrap_admin(self, session: AsyncSession) -> User | None:
+        """Consume ``RECON_BOOTSTRAP_ADMIN_USER`` / ``_PASSWORD`` for headless
+        bring-up. No-ops unless the user table is empty AND both are set - a
+        second run is always ignored (PRD Section 13 row 1)."""
+        from recon.config import get_settings
+
+        s = get_settings()
+        if not (s.bootstrap_admin_user and s.bootstrap_admin_password):
+            return None
+        if not await self.needs_setup(session):
+            return None
+        return await self.create_initial_admin(
+            session, s.bootstrap_admin_user, s.bootstrap_admin_password
+        )
+
     async def create_initial_admin(
         self, session: AsyncSession, username: str, password: str
     ) -> User:

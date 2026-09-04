@@ -71,7 +71,56 @@ uv run python -m recon reset-auth [--yes]   # delete operator accounts (start ov
 uv run python -m recon version
 ```
 
-Run the test suite with `uv run pytest` (~1 min, ~150 tests).
+Run the test suite with `uv run pytest` (~1 min, ~200 tests).
+
+---
+
+### The operator CLI
+
+Everything the dashboard does is also a `recon` subcommand — a thin client over
+the same orchestrator. It runs **in-process** by default (no server needed; it
+opens the configured database directly) or against a **running dashboard** with
+`--server URL` + an API token.
+
+```bash
+uv run python -m recon engagement create --roe path/to/roe.yaml [--name NAME] [--json]
+uv run python -m recon engagement list | show <id> | archive <id>
+uv run python -m recon engagement purge <id> [--older-than DAYS] [--export-first FILE] [--yes]
+
+uv run python -m recon scan start --engagement <id> \
+      --modules dns,ct_subdomains,...   # or --all-passive / --all
+      [--allow-out-of-scope] [--wait] [--yes-active]
+uv run python -m recon scan status --run <id> [--wait] [--json]
+uv run python -m recon scan checkpoint --run <id> --approve   # sign off passive -> active
+uv run python -m recon scan resume  --run <id>
+uv run python -m recon scan cancel  --run <id>
+uv run python -m recon scan list --engagement <id>
+
+uv run python -m recon report  --engagement <id> --format html|pdf|json|csv [--redacted] [--out FILE]
+uv run python -m recon diff    --engagement <id> [--since <run-id>]    # asset-graph delta (Wave 2 populates snapshots)
+uv run python -m recon analyst --engagement <id>                       # needs llm.analysis_enabled
+
+uv run python -m recon token create --name "laptop-cli"   # prints the token once
+uv run python -m recon token list | revoke <id>
+```
+
+- `--json` on every command for scripting.
+- `--wait` streams the same event bus the dashboard WebSocket uses. **In-process
+  there is no background daemon**, so a `scan start` without `--wait` still
+  blocks until the run reaches its next stop (completion or the pre-active
+  checkpoint); against `--server` it returns immediately and the server keeps
+  running the scan.
+- **Exit codes:** `0` ok · `1` user error (bad RoE, unknown module) · `2`
+  finished with module failures · `3` auth · `4` scan failed.
+
+**Headless bring-up:** set `RECON_BOOTSTRAP_ADMIN_USER` / `RECON_BOOTSTRAP_ADMIN_PASSWORD`
+once — the first operator account is created from them on an empty user table
+and they are ignored thereafter. Then `recon token create --name ci` for a
+bearer token, and point remote clients at `--server` with
+`RECON_API_TOKEN` (or `RECON_SERVER_URL` + `RECON_API_TOKEN` in the env).
+
+The REST surface is `/api/v1/*` with `Authorization: Bearer <token>` — the same
+endpoints the CLI's `--server` mode calls.
 
 ---
 
@@ -206,7 +255,35 @@ osint:
   company: str              # searched in crt.sh O=, GitHub, etc.
   seed_domains: [str]       # PIVOT POINTS for OSINT — not added to scan scope
   github_org: str | null    # exact GitHub org/user slug; null => (fragile) search
+
+recon:                      # OPTIONAL — every key has a default; a v1 RoE with no
+                            # `recon:` block loads unchanged.
+  passive_sources:
+    disable: [str]          # names of keyless passive sources to skip
+  recursion:
+    max_rounds: 2           # subdomain-recursion depth (0..5)
+  permutation:
+    wordlist: str | null    # path; null => bundled permutation list
+    max_candidates: 5000    # 0..200000
+  takeover:
+    engine: native          # native | subzy | nuclei
+  git_secrets:
+    clone_depth: full       # full | shallow
+    verify: false           # true => trufflehog live verification (opt-in accelerator)
+  cve:
+    source: local           # local (bundled/refreshable index) | nvd_api (keyless live)
+    subset: kev_high        # kev_high (CISA KEV + CVSS>=7) | full
+  screenshots:
+    enabled: true           # bundled Chromium; self-disables cleanly if absent
+  templates:
+    engine: native          # native (exposure_checks) | nuclei
+    min_severity: low        # info | low | medium | high | critical
+    exclude_tags: [intrusive, dos, fuzz]
 ```
+
+> The `recon:` block is parsed and validated now (Wave 0). The modules that read
+> each sub-block land across Waves 1–3; unknown keys/values are rejected at
+> engagement creation.
 
 ### RoE gotchas
 
@@ -451,8 +528,13 @@ page and is embedded in the internal report.
 | `RECON_HOST` / `RECON_PORT` | `127.0.0.1` / `8000` | |
 | `RECON_SESSION_IDLE_TIMEOUT_MINUTES` | `60` | sliding session expiry |
 | `RECON_SESSION_COOKIE_SECURE` | `false` | set `true` behind HTTPS |
-| `RECON_DATA_DIR` | `./data` | holds `recon.db`, `reports/`, `.secret_key` |
+| `RECON_DATA_DIR` | `./data` | holds `recon.db`, `reports/`, `artifacts/`, `.secret_key` |
 | `RECON_DATABASE_URL` | `sqlite+aiosqlite:///data/recon.db` | SQLAlchemy async URL |
+| `RECON_ARTIFACTS_DIR` | `./data/artifacts` | content-addressed blob store |
+| `RECON_ARTIFACT_SOFT_CAP_BYTES` | `2147483648` | per-engagement soft cap → warning |
+| `RECON_BOOTSTRAP_ADMIN_USER` / `_PASSWORD` | — | one-shot first operator on an empty user table (headless bring-up) |
+| `RECON_SERVER_URL` | — | CLI default for `--server` (REST mode) |
+| `RECON_API_TOKEN` | — | CLI bearer token for `--server` mode |
 | `RECON_FUZZ_WORDLIST` | bundled `common.txt` (116 lines) | point at SecLists |
 | `RECON_FUZZ_MAX_PATHS` | `4000` | hard cap on fuzz candidates |
 | `RECON_OSINT_GITHUB_TOKEN` | — | raises GitHub API 60→5000/hr |

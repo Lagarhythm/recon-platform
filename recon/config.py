@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     session_cookie_name: str = "recon_session"
     session_cookie_secure: bool = False  # set True behind HTTPS
 
+    # One-shot headless bring-up (PRD Section 13 row 1): the first operator
+    # account is created from these on an EMPTY user table only - once a user
+    # exists they are ignored. Leave unset for the interactive /setup flow.
+    bootstrap_admin_user: str = ""
+    bootstrap_admin_password: str = ""
+
+    # --- CLI client ---------------------------------------------------
+    # Consumed by the `recon` CLI, not the server. `server_url` set => the CLI
+    # talks REST to a running dashboard instead of importing the orchestrator
+    # in-process; `api_token` is the bearer credential for that mode.
+    server_url: str = ""
+    api_token: str = ""
+
     # --- LLM Analyst (Phase 4; unused in Phase 1) --------------------
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = ""

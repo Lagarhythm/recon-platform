@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from recon.web.routes import (
+    api_v1,
     assets,
     audit,
     auth,
@@ -13,6 +14,7 @@ from recon.web.routes import (
 )
 
 api_router = APIRouter()
+api_router.include_router(api_v1.router)
 api_router.include_router(system.router)
 api_router.include_router(setup.router)
 api_router.include_router(auth.router)

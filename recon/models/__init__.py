@@ -14,6 +14,7 @@ from recon.models.enums import (
     WindowStatus,
 )
 from recon.models.user import Session, User
+from recon.models.apitoken import ApiToken
 from recon.models.engagement import Engagement
 from recon.models.asset import Asset, AssetRelationship
 from recon.models.scanrun import ScanModuleRun, ScanRun
@@ -27,6 +28,7 @@ __all__ = [
     "Base",
     "User",
     "Session",
+    "ApiToken",
     "Engagement",
     "Asset",
     "AssetRelationship",

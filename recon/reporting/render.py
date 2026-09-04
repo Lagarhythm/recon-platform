@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from collections import Counter
 from pathlib import Path
@@ -138,6 +140,34 @@ def render_html(data: dict[str, Any]) -> str:
 
 def render_json(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=2, sort_keys=False, default=str)
+
+
+def render_csv(data: dict[str, Any]) -> str:
+    """One row per asset - the flat view scripts and spreadsheets want. Findings
+    are assets too (``type == finding``), so they are included."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        ["type", "value", "confidence", "interest", "scope",
+         "first_seen", "last_seen", "modules", "evidence"]
+    )
+    for a in data.get("assets", []):
+        modules = sorted({e.get("module", "") for e in a.get("evidence", []) if e.get("module")})
+        summaries = " | ".join(
+            e.get("summary", "") for e in a.get("evidence", []) if e.get("summary")
+        )
+        writer.writerow([
+            a.get("type", ""),
+            a.get("value", ""),
+            a.get("confidence", ""),
+            a.get("interest", ""),
+            a.get("scope", ""),
+            a.get("first_seen", "") or "",
+            a.get("last_seen", "") or "",
+            ",".join(modules),
+            summaries,
+        ])
+    return buf.getvalue()
 
 
 def render_pdf(data: dict[str, Any]) -> bytes:

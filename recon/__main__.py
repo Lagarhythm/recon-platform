@@ -1,9 +1,20 @@
-"""Operational entrypoint (not the deferred recon-operation CLI - Roadmap 11).
+"""``recon`` command entrypoint.
+
+Operational:
 
     recon serve        run the dashboard
     recon init-db      apply database migrations
     recon reset-auth   delete all operator accounts (forces first-run setup again)
     recon version
+
+Operator CLI (PRD Section 12) - thin client over ``recon.orchestrator``,
+in-process or ``--server URL``:
+
+    recon engagement create|list|show|archive|purge
+    recon scan start|status|checkpoint|resume|cancel|list
+    recon report | recon diff | recon analyst
+    recon cve refresh|status
+    recon token create|list|revoke
 """
 
 from __future__ import annotations
@@ -94,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
     p_reset.set_defaults(func=cmd_reset_auth)
 
     sub.add_parser("version").set_defaults(func=cmd_version)
+
+    from recon.cli.app import register as register_cli
+
+    register_cli(sub)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -26,6 +26,14 @@ async def lifespan(app: FastAPI):
         await scan_service.reap_orphans()
     except Exception:  # e.g. DB not migrated yet - don't block startup
         pass
+    try:
+        from recon.db import session_scope
+        from recon.orchestrator.auth import AuthService
+
+        async with session_scope() as session:
+            await AuthService().maybe_bootstrap_admin(session)
+    except Exception:  # DB not migrated yet / no bootstrap vars - never block startup
+        pass
     yield
     await scan_service.shutdown()
 

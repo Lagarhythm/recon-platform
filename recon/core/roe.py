@@ -64,9 +64,18 @@ class RotationStrategy(str, Enum):
     RANDOM = "random"
 
 
+class WindowEnforcement(str, Enum):
+    WARN = "warn"
+    HARD = "hard"
+
+
 class AuthorizedWindow(BaseModel):
     start: datetime
     end: datetime
+    # PRD Section 4.3 / Section 13 row 2: default is a warning (consistent with
+    # flag-not-block); an engagement may opt into a hard block. Parsed here so a
+    # v2 RoE loads; the scan-time gate reads this value.
+    enforce: WindowEnforcement = WindowEnforcement.WARN
 
     @model_validator(mode="after")
     def _check_order(self) -> AuthorizedWindow:
@@ -193,6 +202,108 @@ class OSINTPolicy(BaseModel):
         return self
 
 
+class TakeoverEngine(str, Enum):
+    NATIVE = "native"
+    SUBZY = "subzy"
+    NUCLEI = "nuclei"
+
+
+class CloneDepth(str, Enum):
+    FULL = "full"
+    SHALLOW = "shallow"
+
+
+class CVESource(str, Enum):
+    LOCAL = "local"
+    NVD_API = "nvd_api"
+
+
+class CVESubset(str, Enum):
+    KEV_HIGH = "kev_high"
+    FULL = "full"
+
+
+class TemplateEngine(str, Enum):
+    NATIVE = "native"
+    NUCLEI = "nuclei"
+
+
+class TemplateSeverity(str, Enum):
+    INFO = "info"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class PassiveSourcesPolicy(BaseModel):
+    """Per-source enable/disable. Default: every keyless source on."""
+
+    disable: list[str] = Field(default_factory=list)
+
+    @field_validator("disable")
+    @classmethod
+    def _clean(cls, v: list[str]) -> list[str]:
+        return sorted({s.strip().lower() for s in v if s.strip()})
+
+
+class RecursionPolicy(BaseModel):
+    max_rounds: int = Field(default=2, ge=0, le=5)
+
+
+class PermutationPolicy(BaseModel):
+    wordlist: str | None = None  # path; None => bundled list
+    max_candidates: int = Field(default=5000, ge=0, le=200_000)
+
+
+class TakeoverPolicy(BaseModel):
+    engine: TakeoverEngine = TakeoverEngine.NATIVE
+
+
+class GitSecretsPolicy(BaseModel):
+    clone_depth: CloneDepth = CloneDepth.FULL
+    # Decision B (PRD Section 13a): trufflehog live verification, opt-in, default off.
+    verify: bool = False
+
+
+class CVEPolicy(BaseModel):
+    # Decision C (PRD Section 13a): local bundled/refreshable index by default,
+    # KEV + CVSS>=7 subset; nvd_api is the keyless live fallback.
+    source: CVESource = CVESource.LOCAL
+    subset: CVESubset = CVESubset.KEV_HIGH
+
+
+class ScreenshotsPolicy(BaseModel):
+    # Decision A (PRD Section 13a): bundled Chromium; the module self-disables
+    # cleanly if the browser is unavailable.
+    enabled: bool = True
+
+
+class TemplatesPolicy(BaseModel):
+    engine: TemplateEngine = TemplateEngine.NATIVE
+    min_severity: TemplateSeverity = TemplateSeverity.LOW
+    exclude_tags: list[str] = Field(default_factory=lambda: ["intrusive", "dos", "fuzz"])
+
+    @field_validator("exclude_tags")
+    @classmethod
+    def _clean(cls, v: list[str]) -> list[str]:
+        return sorted({t.strip().lower() for t in v if t.strip()})
+
+
+class ReconPolicy(BaseModel):
+    """PRD Section 4.2 optional ``recon:`` block. Every field is optional with a
+    PRD default, so a v1 RoE (no ``recon:`` key at all) loads unchanged."""
+
+    passive_sources: PassiveSourcesPolicy = Field(default_factory=PassiveSourcesPolicy)
+    recursion: RecursionPolicy = Field(default_factory=RecursionPolicy)
+    permutation: PermutationPolicy = Field(default_factory=PermutationPolicy)
+    takeover: TakeoverPolicy = Field(default_factory=TakeoverPolicy)
+    git_secrets: GitSecretsPolicy = Field(default_factory=GitSecretsPolicy)
+    cve: CVEPolicy = Field(default_factory=CVEPolicy)
+    screenshots: ScreenshotsPolicy = Field(default_factory=ScreenshotsPolicy)
+    templates: TemplatesPolicy = Field(default_factory=TemplatesPolicy)
+
+
 class RoEConfig(BaseModel):
     engagement: EngagementMeta
     scope: Scope = Field(default_factory=Scope)
@@ -200,6 +311,7 @@ class RoEConfig(BaseModel):
     evasion: Evasion = Field(default_factory=Evasion)
     llm: LLMPolicy = Field(default_factory=LLMPolicy)
     osint: OSINTPolicy = Field(default_factory=OSINTPolicy)
+    recon: ReconPolicy = Field(default_factory=ReconPolicy)
 
     @model_validator(mode="after")
     def _has_a_target(self) -> RoEConfig:
