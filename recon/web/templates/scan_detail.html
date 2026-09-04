@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+{% block title %}Scan {{ run.id[:8] }}{% endblock %}
+{% block content %}
+<h1>Scan run <span class="mono muted">{{ run.id[:8] }}</span>
+  <span class="badge {{ run.status.value }}" id="run-status">{{ run.status.value.replace('_',' ') }}</span></h1>
+<p class="muted">
+  started {{ run.started_at.strftime('%Y-%m-%d %H:%M:%S UTC') if run.started_at else '-' }}
+  {% if run.completed_at %} &middot; finished {{ run.completed_at.strftime('%H:%M:%S UTC') }}{% endif %}
+</p>
+{% if run.error %}<div class="flash warning">{{ run.error }}</div>{% endif %}
+
+{# All three control panels are always in the DOM; the live view toggles which
+   one is visible as the run changes state, so the page never has to reload. #}
+<div id="ctl-awaiting_checkpoint" data-panel class="panel" style="border-color:var(--warn)"
+     {% if run.status.value != 'awaiting_checkpoint' %}hidden{% endif %}>
+  <h2 style="margin-top:0">Passive-first checkpoint</h2>
+  <p>All passive modules have finished and correlation has run. Review what's known
+  in the <a href="/assets">Asset Graph</a> before any active module touches the target.</p>
+  <form method="post" action="/scans/{{ run.id }}/resume">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <button type="submit">Proceed to active modules</button>
+  </form>
+</div>
+<div id="ctl-paused" data-panel class="panel"
+     {% if run.status.value != 'paused' %}hidden{% endif %}>
+  <p class="muted">This run is paused.</p>
+  <form method="post" action="/scans/{{ run.id }}/resume">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <button type="submit">Resume scan</button>
+  </form>
+</div>
+<div id="ctl-running" data-panel class="panel"
+     {% if run.status.value != 'running' %}hidden{% endif %}>
+  <form method="post" action="/scans/{{ run.id }}/cancel">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <button class="danger" type="submit">Cancel scan</button>
+  </form>
+</div>
+
+<h2>Modules</h2>
+<div class="panel">
+  <table>
+    <thead><tr><th>#</th><th>Module</th><th>Phase</th><th>Status</th><th>Progress</th><th>Evidence</th><th>Errors</th><th>Duration</th></tr></thead>
+    <tbody id="module-rows">
+      {% for m in module_rows %}
+      <tr data-module="{{ m.module_name }}"
+          data-status="{{ m.status.value }}"
+          {% if m.started_at %}data-started="{{ m.started_at.isoformat() }}"{% endif %}
+          {% if m.completed_at %}data-ended="{{ m.completed_at.isoformat() }}"{% endif %}>
+        <td class="muted">{{ m.order_index + 1 }}</td>
+        <td><strong>{{ m.module_name }}</strong></td>
+        <td class="muted">{{ m.phase.value }}</td>
+        <td class="col-status"><span class="badge {{ m.status.value }}">{{ m.status.value }}</span></td>
+        <td class="col-progress mono muted">
+          {%- if m.status.value == 'running' -%}
+          <span class="progress-bar indeterminate"><span class="progress-fill"></span></span><span class="pct"></span>
+          {%- endif -%}
+        </td>
+        <td class="col-evidence">{{ m.evidence_count }}</td>
+        <td class="col-errors">{{ m.error_count }}</td>
+        <td class="col-duration muted">
+          {%- if m.started_at and m.completed_at -%}
+          {{ ((m.completed_at - m.started_at).total_seconds()) | round(1) }}s
+          {%- endif -%}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Live log</h2>
+<div class="panel">
+  <pre id="log" class="mono" style="max-height:340px;overflow-y:auto;margin:0;font-size:0.8rem">connecting...</pre>
+</div>
+
+<style>
+  [hidden] { display: none !important; }
+  .progress-bar { display:inline-block; width:90px; height:10px; border:1px solid var(--border);
+    border-radius:5px; overflow:hidden; vertical-align:middle; background:var(--bg); position:relative; }
+  .progress-fill { display:block; height:100%; width:0; background:var(--accent);
+    transition:width .4s ease; }
+  .progress-bar.indeterminate .progress-fill { width:40%; animation:pb-slide 1.1s ease-in-out infinite; }
+  @keyframes pb-slide { 0%{margin-left:-40%} 100%{margin-left:100%} }
+  .col-progress .pct { margin-left:.4rem; font-size:.75rem; color:var(--fg-dim); }
+  #module-rows tr[data-status="completed"] .progress-fill { background:var(--ok); }
+  #module-rows tr[data-status="failed"] .progress-fill { background:var(--warn); }
+  #module-rows tr[data-status="completed"] .progress-bar,
+  #module-rows tr[data-status="failed"] .progress-bar { animation:none; }
+  #module-rows tr[data-status="completed"] .progress-bar.indeterminate .progress-fill,
+  #module-rows tr[data-status="failed"] .progress-bar.indeterminate .progress-fill { animation:none; }
+</style>
+<script>
+(function () {
+  var RUN_ID = "{{ run.id }}";
+  var log = document.getElementById('log');
+  var startedAt = {};   // module -> epoch ms
+  var live = false;     // true once past the WS replay backlog
+
+  function line(t) {
+    var atBottom = log.scrollHeight - log.clientHeight - log.scrollTop < 24;
+    log.textContent += '\n' + t;
+    if (atBottom) log.scrollTop = log.scrollHeight;  // don't yank the user around
+  }
+  function rowFor(mod) {
+    return document.querySelector('#module-rows tr[data-module="' + mod + '"]');
+  }
+  function fmtDur(sec) {
+    if (sec < 60) return sec.toFixed(1) + 's';
+    var m = Math.floor(sec / 60);
+    return m + 'm ' + Math.round(sec - m * 60) + 's';
+  }
+  function setPageStatus(status) {
+    document.querySelectorAll('[data-panel]').forEach(function (p) { p.hidden = true; });
+    var panel = document.getElementById('ctl-' + status);
+    if (panel) panel.hidden = false;
+    var badge = document.getElementById('run-status');
+    if (badge) {
+      badge.className = 'badge ' + status;
+      badge.textContent = status.replace(/_/g, ' ');
+    }
+  }
+
+  document.querySelectorAll('#module-rows tr[data-started]').forEach(function (row) {
+    startedAt[row.dataset.module] = Date.parse(row.dataset.started);
+  });
+  // Live elapsed-time ticker for every running module.
+  setInterval(function () {
+    document.querySelectorAll('#module-rows tr[data-status="running"]').forEach(function (row) {
+      var t0 = startedAt[row.dataset.module];
+      if (t0) row.querySelector('.col-duration').textContent = fmtDur((Date.now() - t0) / 1000);
+    });
+  }, 1000);
+
+  function progressCell(mod) {
+    var row = rowFor(mod);
+    if (!row) return null;
+    var cell = row.querySelector('.col-progress');
+    if (!cell.querySelector('.progress-bar') || !cell.querySelector('.pct')) {
+      cell.innerHTML = '<span class="progress-bar"><span class="progress-fill"></span></span>'
+        + '<span class="pct"></span>';
+    }
+    return cell;
+  }
+  function setProgress(mod, pct) {
+    var cell = progressCell(mod);
+    if (!cell) return;
+    var bar = cell.querySelector('.progress-bar');
+    if (pct === undefined || pct === null) {           // module can't report a %
+      bar.classList.add('indeterminate');
+      cell.querySelector('.pct').textContent = '';
+    } else {
+      bar.classList.remove('indeterminate');
+      bar.querySelector('.progress-fill').style.width = pct + '%';
+      cell.querySelector('.pct').textContent = pct + '%';
+    }
+  }
+  function clearProgress(mod, pct) {
+    var cell = progressCell(mod);
+    if (!cell) return;
+    var bar = cell.querySelector('.progress-bar');
+    bar.classList.remove('indeterminate');
+    bar.querySelector('.progress-fill').style.width = (pct || 0) + '%';
+    cell.querySelector('.pct').textContent = '';
+  }
+  var TERMINAL = { completed: 1, failed: 1, skipped: 1 };
+  function markRow(mod, status, ev, err) {
+    var row = rowFor(mod);
+    if (!row) return;
+    // During replay, don't drag a row the server already rendered as finished
+    // back to "running" just because module_started is in the backlog.
+    if (!live && TERMINAL[row.dataset.status] && status === 'running') return;
+    row.dataset.status = status;
+    row.querySelector('.col-status').innerHTML =
+      '<span class="badge ' + status + '">' + status + '</span>';
+    if (ev !== undefined) row.querySelector('.col-evidence').textContent = ev;
+    if (err !== undefined) row.querySelector('.col-errors').textContent = err;
+  }
+  function setDuration(mod, seconds) {
+    var row = rowFor(mod);
+    if (row) row.querySelector('.col-duration').textContent = fmtDur(seconds);
+  }
+
+  function handle(e) {
+    var t = new Date().toLocaleTimeString();
+    switch (e.type) {
+      case 'synced':
+        live = true;
+        return;
+      case 'module_started':
+        line(t + '  ▶ ' + e.module + ' (' + e.phase + ')');
+        startedAt[e.module] = e.started_at ? Date.parse(e.started_at) : Date.now();
+        markRow(e.module, 'running');
+        if (rowFor(e.module) && rowFor(e.module).dataset.status === 'running') {
+          setProgress(e.module);   // indeterminate until the module reports a %
+        }
+        return;
+      case 'module_completed':
+        line(t + '  ✔ ' + e.module + '  evidence=' + e.evidence + ' errors=' + e.errors);
+        markRow(e.module, 'completed', e.evidence, e.errors);
+        clearProgress(e.module, 100);
+        if (e.duration !== undefined) setDuration(e.module, e.duration);
+        return;
+      case 'module_failed':
+        line(t + '  x ' + e.module + '  FAILED: ' + e.error);
+        markRow(e.module, 'failed');
+        clearProgress(e.module, 100);
+        if (e.duration !== undefined) setDuration(e.module, e.duration);
+        return;
+      case 'module_skipped':
+        line(t + '  – ' + e.module + ' skipped (already complete)');
+        markRow(e.module, 'skipped');
+        return;
+      case 'progress':
+        line(t + '    ' + e.module + ': ' + e.message);
+        setProgress(e.module, e.pct);   // undefined pct -> indeterminate bar
+        return;
+      case 'correlation_started':
+        line(t + '  ⟳ correlating evidence...');
+        return;
+      case 'correlation_completed':
+        line(t + '  ⟳ correlation: +' + e.assets_created + ' assets, ~' + e.assets_updated
+             + ' updated, ' + e.relationships + ' relationships');
+        return;
+      case 'checkpoint_reached':
+        line(t + '  ⏸ passive-first checkpoint reached');
+        if (live) setPageStatus('awaiting_checkpoint');
+        return;
+      case 'scan_completed':
+        line(t + '  ■ scan complete');
+        if (live) setPageStatus('completed');
+        return;
+      case 'scan_failed':
+        line(t + '  ■ scan FAILED');
+        if (live) setPageStatus('failed');
+        return;
+      case 'scan_paused':
+        line(t + '  ⏸ scan paused: ' + (e.reason || ''));
+        if (live) setPageStatus('paused');
+        return;
+    }
+  }
+
+  var ws, retry = 0;
+  function connect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/scans/' + RUN_ID + '/ws');
+    ws.onopen = function () { retry = 0; if (log.textContent === 'connecting...') log.textContent = 'connected'; };
+    ws.onmessage = function (ev) { try { handle(JSON.parse(ev.data)); } catch (_) {} };
+    ws.onclose = function () {
+      live = false;
+      if (retry < 6) {
+        retry++;
+        setTimeout(connect, Math.min(1000 * retry, 5000));  // reconnect, replay re-syncs
+      } else {
+        line('[live updates disconnected – refresh to reconnect]');
+      }
+    };
+  }
+  connect();
+})();
+</script>
+{% endblock %}

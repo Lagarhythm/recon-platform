@@ -1,0 +1,55 @@
+# Rules of Engagement - Nmap Project (full-chain demonstration)
+#
+# A single engagement that exercises all three phases of the platform:
+#
+#   OSINT    - third-party lookups about the "Nmap" project / nmap.org
+#              (crt.sh, RDAP, GitHub, the Internet Archive). Zero packets to
+#              any nmap.org host.
+#   passive  - fetch scanme.nmap.org the way a browser would: headers, TLS,
+#              links, scripts.
+#   active   - nmap + ffuf against scanme.nmap.org ONLY.
+#
+# scanme.nmap.org is provided by the Nmap Project explicitly for people to
+# learn Nmap against, with the request that you "not scan it more than a
+# few dozen times a day" - one pass from this tool is well within that.
+# See https://nmap.org/book/man-legal-issues.html and the banner on
+# http://scanme.nmap.org/ . nmap.org itself is NOT in scan scope.
+
+engagement:
+  name: "Nmap Project - Full-Chain Demo"
+  client: "class demonstration"
+  authorized_window:
+    start: "2026-09-01T00:00:00Z"
+    end: "2026-12-31T23:59:59Z"
+
+osint:
+  enabled: true
+  company: "Nmap"
+  seed_domains:
+    - "nmap.org"
+  github_org: "nmap"
+
+scope:
+  in_scope:
+    hosts:
+      - "scanme.nmap.org"     # the only host anything active will touch
+  excluded:
+    domains:
+      - "nmap.org"            # belt-and-braces: never scan the apex or its subdomains
+    hosts:
+      - "www.nmap.org"
+
+rate_limits:
+  max_requests_per_second: 5   # gentle - scanme asks for it
+  max_concurrent_connections: 5
+
+evasion:
+  jitter:
+    enabled: true
+    min_ms: 200
+    max_ms: 1200
+  user_agents:
+    - "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
+llm:
+  analysis_enabled: true

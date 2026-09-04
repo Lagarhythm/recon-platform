@@ -1,0 +1,308 @@
+"""OSINT-phase modules - all HTTP faked, no real network."""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from recon.config import get_settings
+from recon.modules.osint.ct_org import CTOrgModule
+from recon.modules.osint.github_org import GitHubOrgModule
+from recon.modules.osint.rdap import RDAPModule
+from recon.modules.osint.search import SearchDorkModule
+from recon.modules.osint.wayback import WaybackModule
+from tests.harness import FakeHTTP, evidence_for, module_harness
+
+
+def _json(obj) -> httpx.Response:
+    return httpx.Response(200, json=obj)
+
+
+async def _run(engagement_id, module_name, module_cls, routes, **osint):
+    http = FakeHTTP(routes)
+    async with module_harness(engagement_id, module_name, http=http) as ctx:
+        ctx.roe.osint.enabled = True
+        for k, v in osint.items():
+            setattr(ctx.roe.osint, k, v)
+        await module_cls().run(ctx)
+    return http
+
+
+# --------------------------------------------------------------------------- #
+# ct_org
+# --------------------------------------------------------------------------- #
+_CRTSH_DOMAIN = [
+    {"name_value": "example.com\nwww.example.com\napi.example.com",
+     "issuer_name": "C=US, O=Let's Encrypt, CN=R3",
+     "subject_name": "CN=example.com"},
+]
+_CRTSH_ORG = [
+    {"name_value": "portal.example-labs.net",
+     "issuer_name": "C=US, O=DigiCert Inc",
+     "subject_name": "O=Example Corp, CN=portal.example-labs.net"},
+]
+
+
+@pytest.mark.asyncio
+async def test_ct_org_finds_subdomains_and_owned_domains(engagement_id):
+    routes = {
+        "q=%25.example.com": _json(_CRTSH_DOMAIN),
+        "q=Example%20Corp": _json(_CRTSH_ORG),
+    }
+    await _run(engagement_id, "ct_org", CTOrgModule, routes,
+               company="Example Corp", seed_domains=["example.com"])
+
+    subs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="subdomain")}
+    assert {"www.example.com", "api.example.com"} <= subs
+    domains = {e.subject_value for e in await evidence_for(engagement_id, subject_type="domain")}
+    assert "example-labs.net" in domains            # discovered via the org search
+    orgs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="organization")}
+    assert "Example Corp" in orgs
+
+
+@pytest.mark.asyncio
+async def test_ct_org_noops_without_company_or_domains(engagement_id):
+    async with module_harness(engagement_id, "ct_org", http=FakeHTTP({})) as ctx:
+        ctx.roe.scope.in_scope.domains = []
+        ctx.roe.osint.company = ""
+        ctx.roe.osint.seed_domains = []
+        await CTOrgModule().run(ctx)
+    assert await evidence_for(engagement_id) == []
+
+
+# --------------------------------------------------------------------------- #
+# rdap
+# --------------------------------------------------------------------------- #
+_RDAP_DOMAIN = {
+    "ldhName": "example.com",
+    "status": ["client transfer prohibited"],
+    "entities": [
+        {"roles": ["registrant"],
+         "vcardArray": ["vcard", [["version", {}, "text", "4.0"],
+                                  ["org", {}, "text", "Example Holdings LLC"]]]},
+        {"roles": ["registrar"],
+         "vcardArray": ["vcard", [["fn", {}, "text", "MarkMonitor Inc."]]]},
+    ],
+    "events": [{"eventAction": "registration", "eventDate": "1997-09-15T04:00:00Z"},
+               {"eventAction": "expiration", "eventDate": "2031-09-14T04:00:00Z"}],
+    "nameservers": [{"ldhName": "ns1.example.net"}, {"ldhName": "ns2.example.net"}],
+}
+_RDAP_IP = {
+    "name": "EXAMPLE-NET-1",
+    "cidr0_cidrs": [{"v4prefix": "93.184.216.0", "length": 24}],
+    "entities": [{"roles": ["registrant"],
+                  "vcardArray": ["vcard", [["fn", {}, "text", "Edgecast Inc."]]]}],
+}
+
+
+@pytest.mark.asyncio
+async def test_rdap_domain_and_reverse_ip(engagement_id, monkeypatch):
+    async def fake_resolve(self, name, rtype, raise_on_no_answer=False):  # noqa: ANN001
+        class _RR(list):
+            pass
+        class _A:
+            rrset = _RR()
+        if rtype == "A":
+            rd = type("rd", (), {"to_text": lambda s: "93.184.216.34"})()
+            a = _A(); a.rrset = _RR([rd]); return a
+        return _A()
+    monkeypatch.setattr("dns.asyncresolver.Resolver.resolve", fake_resolve)
+
+    routes = {
+        "rdap.org/domain/example.com": _json(_RDAP_DOMAIN),
+        "rdap.org/ip/93.184.216.34": _json(_RDAP_IP),
+    }
+    await _run(engagement_id, "rdap", RDAPModule, routes, seed_domains=["example.com"])
+
+    orgs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="organization")}
+    assert "Example Holdings LLC" in orgs          # registrant
+    assert "Edgecast Inc." in orgs                 # hosting netblock owner
+    nets = {e.subject_value for e in await evidence_for(engagement_id, subject_type="netblock")}
+    assert "93.184.216.0/24" in nets
+    dom_ev = await evidence_for(engagement_id, subject_type="domain")
+    assert any(e.raw_data.get("registrar") == "MarkMonitor Inc." for e in dom_ev)
+
+
+# --------------------------------------------------------------------------- #
+# github_org
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_github_org_repos_members_tech(engagement_id):
+    routes = {
+        "api.github.com/users/examplecorp/repos": _json([
+            {"full_name": "examplecorp/web", "html_url": "https://github.com/examplecorp/web",
+             "language": "TypeScript", "description": "the site", "topics": ["frontend"],
+             "fork": False},
+            {"full_name": "examplecorp/api", "html_url": "https://github.com/examplecorp/api",
+             "language": "Go", "description": None, "topics": [], "fork": False},
+        ]),
+        "api.github.com/orgs/examplecorp/members": _json([
+            {"login": "alice", "html_url": "https://github.com/alice"},
+            {"login": "bob", "html_url": "https://github.com/bob"},
+        ]),
+        "api.github.com/users/examplecorp": _json(
+            {"login": "examplecorp", "type": "Organization", "name": "Example Corp",
+             "blog": "https://example.com", "email": "oss@example.com", "public_repos": 2}),
+    }
+    await _run(engagement_id, "github_org", GitHubOrgModule, routes,
+               github_org="examplecorp")
+
+    repos = {e.subject_value for e in await evidence_for(engagement_id, subject_type="repository")}
+    assert "https://github.com/examplecorp/web" in repos
+    people = {e.subject_value for e in await evidence_for(engagement_id, subject_type="person")}
+    assert {"alice", "bob"} <= people
+    stack = await evidence_for(engagement_id, subject_type="tech_stack")
+    assert stack and set(stack[0].raw_data["languages"]) == {"Go", "TypeScript"}
+    emails = {e.subject_value for e in await evidence_for(engagement_id, subject_type="email")}
+    assert "oss@example.com" in emails
+
+
+@pytest.mark.asyncio
+async def test_github_org_rejects_fuzzy_name_match(engagement_id):
+    # searching a common company name hits unrelated accounts whose *display
+    # name* also contains it - with a seed domain given and none corroborating,
+    # trust none of them.
+    routes = {
+        "search/users": _json({"items": [{"login": "orbit3ai"},
+                                         {"login": "acme-orbit-community"}]}),
+        "api.github.com/users/orbit3ai": _json(
+            {"login": "orbit3ai", "type": "Organization", "name": "Orbit3.ai",
+             "blog": "https://orbit3.ai"}),
+        "api.github.com/users/acme-orbit-community": _json(
+            {"login": "acme-orbit-community", "type": "Organization",
+             "name": "Orbit AI", "blog": "https://orbit-ai.onrender.com",
+             "email": "orbit@acme-college.example"}),
+    }
+    await _run(engagement_id, "github_org", GitHubOrgModule, routes,
+               company="Orbit AI", seed_domains=["orbitai.example"])
+    assert await evidence_for(engagement_id, subject_type="repository") == []
+    assert await evidence_for(engagement_id, subject_type="person") == []
+    assert await evidence_for(engagement_id, subject_type="organization") == []
+
+
+@pytest.mark.asyncio
+async def test_github_org_accepts_user_account_by_blog_domain(engagement_id):
+    # a project's GitHub presence can be a *User* account whose blog is the seed
+    # domain - that corroboration is enough to accept it.
+    routes = {
+        "search/users": _json({"items": [{"login": "OrbitAI"}]}),
+        "api.github.com/users/OrbitAI/repos": _json([
+            {"full_name": "OrbitAI/site", "html_url": "https://github.com/OrbitAI/site",
+             "language": "HTML", "description": None, "topics": [], "fork": False},
+        ]),
+        "api.github.com/users/OrbitAI": _json(
+            {"login": "OrbitAI", "type": "User", "name": "Orbit AI",
+             "blog": "https://orbitai.example", "public_repos": 1}),
+    }
+    await _run(engagement_id, "github_org", GitHubOrgModule, routes,
+               company="Orbit AI", seed_domains=["orbitai.example"])
+    repos = {e.subject_value for e in await evidence_for(engagement_id, subject_type="repository")}
+    assert "https://github.com/OrbitAI/site" in repos
+    # a User has no /orgs/<x>/members - must not fabricate people
+    assert await evidence_for(engagement_id, subject_type="person") == []
+
+
+# --------------------------------------------------------------------------- #
+# wayback
+# --------------------------------------------------------------------------- #
+_CDX = [
+    ["original", "timestamp", "statuscode", "mimetype"],
+    ["http://example.com/", "20180101000000", "200", "text/html"],
+    ["http://old.example.com/", "20150101000000", "200", "text/html"],
+    ["http://example.com/files/budget-2017.pdf", "20170101000000", "200", "application/pdf"],
+    ["http://example.com/admin/login", "20160101000000", "200", "text/html"],
+]
+
+
+@pytest.mark.asyncio
+async def test_wayback_subdomains_docs_and_paths(engagement_id):
+    routes = {"web.archive.org/cdx/search/cdx": _json(_CDX)}
+    await _run(engagement_id, "wayback", WaybackModule, routes, seed_domains=["example.com"])
+
+    subs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="subdomain")}
+    assert "old.example.com" in subs
+    docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
+    assert "http://example.com/files/budget-2017.pdf" in docs
+    urls = {e.subject_value for e in await evidence_for(engagement_id, subject_type="url")}
+    assert "http://example.com/admin/login" in urls
+
+
+# --------------------------------------------------------------------------- #
+# search (dorking)
+# --------------------------------------------------------------------------- #
+def _searx(results) -> httpx.Response:
+    return httpx.Response(200, json={"query": "x", "results": results})
+
+
+@pytest.mark.asyncio
+async def test_search_noops_without_a_backend(engagement_id, monkeypatch):
+    monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: None)
+    async with module_harness(engagement_id, "search", http=FakeHTTP({})) as ctx:
+        ctx.roe.osint.company = "Acme"
+        await SearchDorkModule().run(ctx)
+    assert await evidence_for(engagement_id) == []
+
+
+@pytest.mark.asyncio
+async def test_search_dorks_produce_documents_people_subdomains(engagement_id, monkeypatch):
+    monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: "searxng")
+
+    def route(method, url):
+        if "filetype%3Apdf" in url or "filetype:pdf" in url:
+            return _searx([{"url": "https://example.com/reports/q3.pdf", "title": "Q3 report",
+                            "content": "", "engine": "google"}])
+        if "linkedin.com" in url:
+            return _searx([
+                {"url": "https://linkedin.com/in/jane-doe",
+                 "title": "Jane Doe - Acme Corp", "content": "Acme Corp", "engine": "bing"},
+                # SEO spam that echoes the dork back - must be dropped, not made a person
+                {"url": "https://spam.example.net/x",
+                 "title": 'Lorem ipsum "Acme Corp" site:linkedin.com/in dolor',
+                 "content": "Acme Corp", "engine": "bing"},
+            ])
+        if "-inurl%3Awww" in url or "-inurl:www" in url:
+            return _searx([{"url": "https://vpn.example.com/", "title": "VPN",
+                            "content": "contact ops@example.com", "engine": "google"}])
+        return _searx([])
+
+    http = FakeHTTP({"127.0.0.1:8888": route})
+    async with module_harness(engagement_id, "search", http=http) as ctx:
+        ctx.roe.osint.company = "Acme Corp"
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+
+    docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
+    assert "https://example.com/reports/q3.pdf" in docs
+    people = {e.subject_value for e in await evidence_for(engagement_id, subject_type="person")}
+    assert people == {"Jane Doe"}          # the spam result was rejected
+    subs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="subdomain")}
+    assert "vpn.example.com" in subs
+    emails = {e.subject_value for e in await evidence_for(engagement_id, subject_type="email")}
+    assert "ops@example.com" in emails      # scraped from a result snippet
+
+
+@pytest.mark.asyncio
+async def test_search_falls_back_to_google_cse_when_searxng_empty(engagement_id, monkeypatch):
+    from recon.modules.osint import _search
+
+    monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: "searxng")
+    monkeypatch.setenv("RECON_GOOGLE_CSE_KEY", "k")
+    monkeypatch.setenv("RECON_GOOGLE_CSE_ID", "cx")
+    get_settings.cache_clear()
+
+    def route(method, url):
+        if "googleapis.com/customsearch" in url:
+            return httpx.Response(200, json={"items": [
+                {"link": "https://example.com/leak.sql", "title": "dump", "snippet": ""}]})
+        return _searx([])                     # SearXNG returns nothing for everything
+
+    http = FakeHTTP({"127.0.0.1:8888": route, "googleapis.com": route})
+    async with module_harness(engagement_id, "search", http=http) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
+    assert "https://example.com/leak.sql" in docs   # came from the CSE fallback

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Reports{% endblock %}
+{% block content %}
+<h1>Reports &mdash; {{ active_engagement.name }}</h1>
+
+<h2>Download</h2>
+<div class="panel">
+  <table>
+    <tr>
+      <th>Format</th><th>Internal (full)</th><th>Client (redacted)</th>
+    </tr>
+    <tr>
+      <td><strong>HTML</strong><div class="hint">interactive, browse in a tab</div></td>
+      <td><a class="btn" href="/reports/download?format=html&redact=0" target="_blank">Open</a></td>
+      <td><a class="btn secondary" href="/reports/download?format=html&redact=1" target="_blank">Open</a></td>
+    </tr>
+    <tr>
+      <td><strong>PDF</strong><div class="hint">client deliverable</div></td>
+      <td><a class="btn" href="/reports/download?format=pdf&redact=0">Download</a></td>
+      <td><a class="btn secondary" href="/reports/download?format=pdf&redact=1">Download</a></td>
+    </tr>
+    <tr>
+      <td><strong>JSON</strong><div class="hint">machine-readable export / archival</div></td>
+      <td><a class="btn" href="/reports/download?format=json&redact=0">Download</a></td>
+      <td><a class="btn secondary" href="/reports/download?format=json&redact=1">Download</a></td>
+    </tr>
+  </table>
+  <p class="hint">Redacted copies strip raw request/response bodies, internal file
+  paths, working notes, and the stored RoE document. The analyst assessment is
+  included in the internal report only.</p>
+</div>
+
+<h2>LLM Analyst</h2>
+<div class="panel">
+  {% if not active_engagement.llm_analysis_enabled %}
+  <p class="muted">Remote LLM analysis is <strong>disabled</strong> for this engagement.
+  Enable it on the <a href="/engagements/{{ active_engagement.id }}">engagement page</a>
+  &mdash; note that correlated recon data will be sent to the configured remote endpoint.</p>
+  {% else %}
+  <p>The Asset Graph (client-redacted) will be sent to the configured remote model
+  for a prioritised assessment. Read-only &mdash; the model cannot trigger scans.</p>
+  <form method="post" action="/analyst/run">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <button type="submit">Run analyst assessment</button>
+  </form>
+  {% endif %}
+
+  {% if analysis %}
+  <h3 style="margin-top:1.5rem">Latest assessment
+    <span class="muted">{{ analysis.created_at.strftime('%Y-%m-%d %H:%M UTC') }}
+    &middot; {{ analysis.model }}</span></h3>
+  {% if analysis.error %}
+  <div class="flash error">{{ analysis.error }}</div>
+  {% else %}
+  <p>{{ analysis.summary }}</p>
+  {% if analysis.priorities %}
+  <strong>Priorities</strong>
+  <ol>{% for p in analysis.priorities %}<li>{{ p }}</li>{% endfor %}</ol>
+  {% endif %}
+  {% if analysis.next_steps %}
+  <strong>Suggested next recon steps</strong>
+  <ul>{% for s in analysis.next_steps %}<li>{{ s }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+</div>
+{% endblock %}

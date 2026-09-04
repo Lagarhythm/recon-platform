@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.pytest_cache/
+.coverage
+htmlcov/
+data/
+*.log
+.env
+engagements/*
+!engagements/example.yaml
+!engagements/README.md
+!engagements/nmap-demo.yaml
+
+# SearXNG generates uwsgi.ini / etc. into its config dir; only settings.yml is ours
+searxng/config/*
+!searxng/config/settings.yml
+
+# Internal planning / research — not for the public repo
+docs/research/

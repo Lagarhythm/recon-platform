@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <h1>Sign in</h1>
+  <div class="panel">
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <label>Username</label>
+      <input type="text" name="username" autocomplete="username" required autofocus>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required>
+      <div style="margin-top:1rem"><button type="submit">Sign in</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

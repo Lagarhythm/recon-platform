@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}New engagement{% endblock %}
+{% block content %}
+{% set first = not form %}
+<h1>New engagement</h1>
+<p class="muted">This form builds and validates an RoE document for you. The generated YAML
+is stored verbatim and shown on the engagement page &mdash; you can edit it by hand later.
+Prefer to write it yourself? <a href="/engagements">Use the raw YAML box</a>.</p>
+
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+<form method="post" action="/engagements/new">
+  <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+
+  <div class="panel">
+    <h2 style="margin-top:0">Engagement</h2>
+    <label>Name *</label>
+    <input type="text" name="name" required value="{{ form.get('name','') }}"
+           placeholder="Acme Corp - Q3 External Pentest">
+    <label>Client *</label>
+    <input type="text" name="client" required value="{{ form.get('client','') }}"
+           placeholder="Acme Corp">
+    <div class="grid">
+      <div><label>Authorized window start (UTC)</label>
+        <input type="datetime-local" name="window_start" value="{{ form.get('window_start','') }}"></div>
+      <div><label>Authorized window end (UTC)</label>
+        <input type="datetime-local" name="window_end" value="{{ form.get('window_end','') }}"></div>
+    </div>
+    <p class="hint">Leave both blank to skip time-window checks. Times are treated as UTC.</p>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">In scope</h2>
+    <p class="hint">One entry per line (or comma-separated).</p>
+    <div class="grid">
+      <div><label>Domains</label>
+        <textarea name="in_domains" style="min-height:110px"
+                  placeholder="example.com&#10;api.example.com">{{ form.get('in_domains','') }}</textarea></div>
+      <div><label>CIDR ranges</label>
+        <textarea name="in_cidrs" style="min-height:110px"
+                  placeholder="203.0.113.0/24">{{ form.get('in_cidrs','') }}</textarea></div>
+      <div><label>Individual hosts</label>
+        <textarea name="in_hosts" style="min-height:110px"
+                  placeholder="vpn.example.com">{{ form.get('in_hosts','') }}</textarea></div>
+    </div>
+    <label style="display:inline-block;margin-top:0.8rem">
+      <input type="checkbox" name="include_subdomains" value="on"
+             {% if first or form.get('include_subdomains') %}checked{% endif %}>
+      Also authorize subdomains of each domain (adds <code>*.domain</code>)
+    </label>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">Excluded <span class="muted">(carve-outs from in-scope)</span></h2>
+    <div class="grid">
+      <div><label>Hosts</label>
+        <textarea name="ex_hosts" style="min-height:90px"
+                  placeholder="mail.example.com">{{ form.get('ex_hosts','') }}</textarea></div>
+      <div><label>Domains</label>
+        <textarea name="ex_domains" style="min-height:90px">{{ form.get('ex_domains','') }}</textarea></div>
+      <div><label>CIDR ranges</label>
+        <textarea name="ex_cidrs" style="min-height:90px"
+                  placeholder="203.0.113.128/28">{{ form.get('ex_cidrs','') }}</textarea></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">Rate limits</h2>
+    <div class="grid">
+      <div><label>Max requests / second</label>
+        <input type="number" name="max_rps" step="0.1" min="0.1"
+               value="{{ form.get('max_rps','') or (first and '10') or '' }}"></div>
+      <div><label>Max concurrent connections</label>
+        <input type="number" name="max_conc" min="1"
+               value="{{ form.get('max_conc','') or (first and '20') or '' }}"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">Evasion</h2>
+    <label style="display:inline-block">
+      <input type="checkbox" name="jitter_enabled" value="on"
+             {% if first or form.get('jitter_enabled') %}checked{% endif %}> Enable request jitter
+    </label>
+    <div class="grid">
+      <div><label>Jitter min (ms)</label>
+        <input type="number" name="jitter_min" min="0"
+               value="{{ form.get('jitter_min','') or (first and '100') or '' }}"></div>
+      <div><label>Jitter max (ms)</label>
+        <input type="number" name="jitter_max" min="0"
+               value="{{ form.get('jitter_max','') or (first and '1500') or '' }}"></div>
+    </div>
+    <label>User-Agent strings <span class="muted">(one per line; rotated per request)</span></label>
+    <textarea name="user_agents" style="min-height:90px">{{ form.get('user_agents','') }}</textarea>
+    <label>Rotation strategy</label>
+    <select name="rotation_strategy">
+      {% for c in rotation_choices %}
+      <option value="{{ c }}" {% if form.get('rotation_strategy', 'round_robin') == c %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0">Remote LLM analysis</h2>
+    <label style="display:inline-block">
+      <input type="checkbox" name="llm_enabled" value="on" {% if form.get('llm_enabled') %}checked{% endif %}>
+      Allow sending correlated recon data for this engagement to the remote LLM endpoint
+    </label>
+    <p class="hint" style="color:var(--warn)">Off by default. Only enable if the RoE permits
+    third-party data processing &mdash; recon data will leave this host.</p>
+  </div>
+
+  <div style="margin:1.2rem 0 3rem"><button type="submit">Create engagement</button>
+    <a class="btn secondary" href="/engagements">Cancel</a></div>
+</form>
+{% endblock %}

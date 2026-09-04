@@ -1,0 +1,353 @@
+"""The module contract.
+
+A module implements :class:`ReconModule` and does its work through the
+:class:`ModuleContext` handed to ``run()``. The context is the only sanctioned
+side-effect channel: evidence emission, audited outbound requests, progress
+events, and the liveness check all go through it.
+"""
+
+from __future__ import annotations
+
+import abc
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from recon.core.audit import audit_logger
+from recon.core.roe import RoEConfig
+from recon.core.scope import ScopeManager
+from recon.models.engagement import Engagement
+from recon.models.enums import FindingPolarity, ModulePhase, ScopeStatus
+from recon.models.evidence import Evidence
+from recon.models.scanrun import ScanModuleRun
+from recon.net.http_client import ReconHTTPClient
+
+ModulePhaseType = ModulePhase
+
+EventEmitter = Callable[..., Awaitable[None]]
+
+_COMMIT_EVERY = 25
+
+
+class ScanCancelled(RuntimeError):
+    """Raised inside a module when the operator cancels the run or hits the kill switch."""
+
+
+class ModuleTimeout(RuntimeError):
+    """Raised inside a module when it overruns its wall-clock budget. Marks the
+    module FAILED (partial evidence is kept); the scan run continues."""
+
+
+class ModuleContext:
+    """Handed to ``ReconModule.run``. Not constructed by modules."""
+
+    def __init__(
+        self,
+        *,
+        engagement: Engagement,
+        roe: RoEConfig,
+        scope: ScopeManager,
+        scan_run_id: str,
+        module_name: str,
+        module_run: ScanModuleRun,
+        session: AsyncSession,
+        http: ReconHTTPClient,
+        emit_event: EventEmitter,
+        is_cancelled: Callable[[], bool],
+        allow_out_of_scope: bool = False,
+        deadline: float | None = None,
+    ) -> None:
+        self.engagement = engagement
+        self.roe = roe
+        self.scope = scope
+        self.scan_run_id = scan_run_id
+        self.module_name = module_name
+        self.http = http
+        #: operator opted this run in to touching flagged/excluded targets
+        self.allow_out_of_scope = allow_out_of_scope
+        self._module_run = module_run
+        self._session = session
+        self._emit_event = emit_event
+        self._is_cancelled = is_cancelled
+        #: ``time.monotonic()`` value past which ``check_alive`` raises
+        #: ``ModuleTimeout``. ``None`` = no wall-clock limit.
+        self._deadline = deadline
+        self._since_commit = 0
+        # Serialises DB writes so a module doing concurrent work (asyncio.gather
+        # over many hosts) can't corrupt the shared session.
+        self._lock = asyncio.Lock()
+
+    # --- liveness --------------------------------------------------------
+    def check_alive(self) -> None:
+        """Call frequently - at every request boundary and loop iteration.
+
+        Raises ``ScanCancelled`` if the operator stopped the run, or
+        ``ModuleTimeout`` if the module has overrun its wall-clock budget.
+        """
+        if self._is_cancelled():
+            raise ScanCancelled(f"{self.module_name}: run cancelled")
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            raise ModuleTimeout(f"{self.module_name}: exceeded its time budget")
+
+    # --- evidence emission ----------------------------------------------
+    async def add_evidence(
+        self,
+        *,
+        subject_type: str,
+        subject_value: str,
+        raw_data: dict[str, Any],
+        summary: str | None = None,
+        request_metadata: dict[str, Any] | None = None,
+        polarity: FindingPolarity = FindingPolarity.PRESENT,
+        relationships: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Record a positive discovery (or, with ``polarity=ABSENT``, a
+        recorded absence).
+
+        ``relationships`` is an optional list of
+        ``{"type": "...", "target_type": "...", "target_value": "..."}`` hints
+        the Correlation Engine turns into AssetRelationship rows.
+        """
+        payload = dict(raw_data)
+        if relationships:
+            payload.setdefault("relationships", relationships)
+        ev = Evidence(
+            engagement_id=self.engagement.id,
+            scan_run_id=self.scan_run_id,
+            source_module=self.module_name,
+            subject_type=subject_type,
+            subject_value=subject_value[:1024],
+            raw_data=payload,
+            summary=summary,
+            request_metadata=request_metadata,
+            polarity=polarity,
+        )
+        async with self._lock:
+            self._session.add(ev)
+            self._module_run.evidence_count += 1
+            await self._tick()
+        await self._emit_event(
+            "evidence",
+            module=self.module_name,
+            subject_type=subject_type,
+            subject_value=subject_value,
+            polarity=polarity.value,
+        )
+
+    async def add_negative(
+        self,
+        *,
+        subject_type: str,
+        subject_value: str,
+        summary: str,
+        raw_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Absence of a control is itself a finding (PRD Section 7.2)."""
+        await self.add_evidence(
+            subject_type=subject_type,
+            subject_value=subject_value,
+            raw_data=raw_data or {},
+            summary=summary,
+            polarity=FindingPolarity.ABSENT,
+        )
+
+    async def add_error(
+        self, *, subject_value: str, summary: str, raw_data: dict[str, Any] | None = None
+    ) -> None:
+        """A per-target failure. Logged as evidence; does not abort the run."""
+        ev = Evidence(
+            engagement_id=self.engagement.id,
+            scan_run_id=self.scan_run_id,
+            source_module=self.module_name,
+            subject_type="error",
+            subject_value=subject_value[:1024],
+            raw_data=raw_data or {},
+            summary=summary,
+            is_error=True,
+        )
+        async with self._lock:
+            self._session.add(ev)
+            self._module_run.error_count += 1
+            await self._tick()
+
+    # --- reading prior findings (module chaining) ----------------------
+    async def known_values(self, *subject_types: str) -> list[str]:
+        """Distinct evidence subject values of the given types for this
+        engagement, across every prior module and scan run. This is how a
+        downstream module (crawler, JS analyzer) picks up its inputs."""
+        stmt = (
+            select(Evidence.subject_value)
+            .where(
+                Evidence.engagement_id == self.engagement.id,
+                Evidence.subject_type.in_(subject_types),
+                Evidence.polarity == FindingPolarity.PRESENT,
+                Evidence.is_error.is_(False),
+            )
+            .distinct()
+        )
+        async with self._lock:
+            rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
+
+    async def known_evidence(self, *subject_types: str) -> Sequence[Evidence]:
+        stmt = select(Evidence).where(
+            Evidence.engagement_id == self.engagement.id,
+            Evidence.subject_type.in_(subject_types),
+            Evidence.is_error.is_(False),
+        )
+        async with self._lock:
+            return (await self._session.execute(stmt)).scalars().all()
+
+    def scoped_targets(self, targets) -> list[str]:  # noqa: ANN001
+        """Filter a target iterable for active use: EXCLUDED is always dropped;
+        FLAGGED is dropped unless the run has an out-of-scope override."""
+        from recon.models.enums import ScopeStatus
+
+        out: list[str] = []
+        for t in targets:
+            status = self.scope.classify(t).status
+            if status is ScopeStatus.EXCLUDED:
+                continue
+            if status is ScopeStatus.FLAGGED and not self.allow_out_of_scope:
+                continue
+            out.append(t)
+        return out
+
+    async def known_assets(
+        self, *asset_types: str, in_scope_only: bool = True
+    ) -> list[str]:
+        """Correlated Asset values of the given types. Active modules use this
+        (post-checkpoint) to get their targets, defaulting to in-scope only."""
+        from recon.models.asset import Asset
+        from recon.models.enums import AssetType, ScopeStatus
+
+        types = [AssetType(t) for t in asset_types]
+        stmt = select(Asset.value).where(
+            Asset.engagement_id == self.engagement.id, Asset.type.in_(types)
+        )
+        if in_scope_only:
+            stmt = stmt.where(Asset.in_scope_status == ScopeStatus.IN_SCOPE)
+        async with self._lock:
+            return list((await self._session.execute(stmt)).scalars().all())
+
+    # --- audit for non-HTTP outbound actions --------------------------
+    async def audit_action(
+        self,
+        *,
+        target: str,
+        request_detail: dict[str, Any],
+        response_meta: dict[str, Any] | None = None,
+        in_scope_status: ScopeStatus = ScopeStatus.NOT_APPLICABLE,
+        override_used: bool = False,
+    ) -> None:
+        """For outbound actions the shared HTTP client does not make - e.g. a
+        DNS query. HTTP requests through ``self.http`` are audited automatically."""
+        await self.record_audit(
+            target=target,
+            request_detail=request_detail,
+            response_meta=response_meta,
+            in_scope_status=in_scope_status,
+            override_used=override_used,
+        )
+
+    async def record_audit(
+        self,
+        *,
+        target: str,
+        request_detail: dict[str, Any],
+        response_meta: dict[str, Any] | None = None,
+        in_scope_status: ScopeStatus = ScopeStatus.NOT_APPLICABLE,
+        override_used: bool = False,
+        module: str | None = None,
+    ) -> None:
+        """Write one audit row on the module's own session (single writer, no
+        cross-connection lock contention). Also used by ReconHTTPClient."""
+        async with self._lock:
+            await audit_logger.record(
+                self._session,
+                engagement_id=self.engagement.id,
+                scan_run_id=self.scan_run_id,
+                module=module or self.module_name,
+                target=target,
+                in_scope_status=in_scope_status,
+                roe_config_hash=self.engagement.roe_config_hash,
+                request_detail=request_detail,
+                response_meta=response_meta,
+                override_used=override_used,
+            )
+            await self._tick()
+
+    # --- progress -----------------------------------------------------
+    async def progress(
+        self,
+        message: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        **fields: Any,
+    ) -> None:
+        """Emit a live progress event.
+
+        Pass ``current`` and ``total`` when the module is working through a
+        countable set of units - the dashboard turns them into a live percent
+        for the running module. ``count`` (legacy) is still accepted via
+        ``**fields`` but carries no percent.
+        """
+        if current is not None:
+            fields["current"] = current
+        if total:
+            fields["total"] = total
+            fields["pct"] = max(0, min(100, round(100 * (current or 0) / total)))
+        await self._emit_event(
+            "progress", module=self.module_name, message=message, **fields
+        )
+
+    # --- internal ---------------------------------------------------
+    async def _tick(self) -> None:
+        """Caller must already hold ``self._lock``."""
+        self._since_commit += 1
+        if self._since_commit >= _COMMIT_EVERY:
+            await self._session.commit()
+            self._since_commit = 0
+
+    async def flush(self) -> None:
+        async with self._lock:
+            await self._session.commit()
+            self._since_commit = 0
+
+
+class ReconModule(abc.ABC):
+    """Base class for all recon modules.
+
+    Subclasses set the class attributes and implement ``run``. Registration is
+    by decorating with ``@register`` (see ``recon.modules.registry``).
+    """
+
+    #: unique slug, e.g. "dns"
+    name: str = ""
+    #: passive modules run (and reach a checkpoint) before any active module
+    phase: ModulePhase = ModulePhase.PASSIVE
+    #: module slugs that must complete before this one starts
+    depends_on: tuple[str, ...] = ()
+    #: one-line description for the scan-setup UI
+    description: str = ""
+    #: whether this module needs an external binary (nmap/ffuf) present
+    requires_binary: str | None = None
+    #: wall-clock ceiling for one run of this module, in seconds. ``None`` uses
+    #: the orchestrator's per-phase default. A module that manages its own hard
+    #: timeout internally (e.g. an nmap subprocess) can set this higher.
+    max_runtime_seconds: float | None = None
+
+    @abc.abstractmethod
+    async def run(self, ctx: ModuleContext) -> None:
+        """Do the recon. Emit findings via ``ctx.add_evidence`` / ``add_negative``.
+
+        Raising propagates and marks the module failed (the scan run continues
+        to the next module). Per-target failures should use ``ctx.add_error``
+        and keep going.
+        """
+        raise NotImplementedError

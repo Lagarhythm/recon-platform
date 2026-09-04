@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Audit Log{% endblock %}
+{% block content %}
+<h1>Audit Log &mdash; {{ active_engagement.name }}</h1>
+<p class="muted">{{ total }} total entries. Append-only: every outbound request the tool makes is
+recorded here with the scope decision and RoE hash in force at the time.</p>
+
+<div class="panel">
+  <form method="get" action="/audit" class="row-actions">
+    <input type="text" name="module" value="{{ module }}" placeholder="module" style="max-width:180px">
+    <select name="scope">
+      <option value="">any scope</option>
+      {% for s in ScopeStatus %}
+      <option value="{{ s.value }}" {% if scope == s.value %}selected{% endif %}>{{ s.value }}</option>
+      {% endfor %}
+    </select>
+    <label style="display:inline;margin:0">
+      <input type="checkbox" name="overrides" value="1" {% if overrides %}checked{% endif %}> overrides only
+    </label>
+    <button type="submit">Filter</button>
+  </form>
+</div>
+
+<div class="panel">
+  {% if entries %}
+  <div class="table-wrap">
+  <table style="table-layout:fixed">
+    <colgroup>
+      <col style="width:10rem"><col style="width:8rem"><col>
+      <col style="width:7rem"><col style="width:7rem"><col style="width:6rem">
+    </colgroup>
+    <thead><tr><th>Timestamp (UTC)</th><th>Module</th><th>Target</th><th>Scope</th>
+      <th>Response</th><th>RoE</th></tr></thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td class="mono muted nowrap">{{ e.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        <td class="nowrap">{{ e.module }}</td>
+        <td class="mono" style="font-size:0.8rem">
+          {%- set d = e.request_detail or {} -%}
+          <span class="muted">{{ d.get('method', 'GET') }}</span> {{ e.target }}
+        </td>
+        <td class="nowrap"><span class="badge {{ e.in_scope_status.value }}">{{ e.in_scope_status.value }}</span>
+          {% if e.override_used %}<span class="badge excluded" title="out-of-scope override">OVR</span>{% endif %}</td>
+        <td class="muted nowrap">
+          {%- if e.response_meta and e.response_meta.get('error') -%}
+            <span style="color:var(--err)">{{ e.response_meta.get('error') }}</span>
+          {%- elif e.response_meta and e.response_meta.get('status') is not none -%}
+            {{ e.response_meta.get('status') }}{% if e.response_meta.get('bytes') is not none %}
+            &middot; {{ e.response_meta.get('bytes') }}B{% endif %}
+          {%- else -%}&mdash;{%- endif -%}
+        </td>
+        <td class="mono muted nowrap" title="{{ e.roe_config_hash }}">{{ e.roe_config_hash[:8] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <div class="row-actions" style="margin-top:1rem">
+    {% if page > 1 %}<a class="btn secondary" href="/audit?page={{ page-1 }}&module={{ module }}&scope={{ scope }}&overrides={{ 1 if overrides else 0 }}">&larr; Prev</a>{% endif %}
+    {% if entries|length == per_page %}<a class="btn secondary" href="/audit?page={{ page+1 }}&module={{ module }}&scope={{ scope }}&overrides={{ 1 if overrides else 0 }}">Next &rarr;</a>{% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No audit entries match. Active recon modules (Phase 3) will populate this log.</p>
+  {% endif %}
+</div>
+{% endblock %}

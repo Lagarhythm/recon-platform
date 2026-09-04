@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# recon-platform — launcher for the Recon-Tool dashboard
+#
+#   recon-platform            start it in the background (idempotent)
+#   recon-platform fg         run it in the foreground (Ctrl+C to stop)
+#   recon-platform status     is it up?
+#   recon-platform stop       stop it
+#   recon-platform restart    stop + start (background)
+#   recon-platform log        tail the server log
+#   recon-platform open       open the dashboard in a browser
+#   recon-platform <other>    passthrough: recon-platform init-db / version / reset-auth
+#
+# Overridable via env: RECON_PLATFORM_DIR, RECON_HOST, RECON_PORT
+set -euo pipefail
+
+DIR="${RECON_PLATFORM_DIR:-$HOME/Projects/Recon-Tool}"
+PY="$DIR/.venv/bin/python"
+HOST="${RECON_HOST:-127.0.0.1}"
+PORT="${RECON_PORT:-8000}"
+URL="http://$HOST:$PORT"
+LOG="$DIR/data/serve.log"
+PIDFILE="$DIR/data/serve.pid"
+
+[ -x "$PY" ] || { echo "recon-platform: $PY not found — run 'uv sync' in $DIR" >&2; exit 1; }
+
+_up()  { curl -sf -o /dev/null --max-time 3 "$URL/health"; }
+_pid() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null && cat "$PIDFILE"; }
+
+_stop() {
+  local p; p="$(_pid || true)"
+  if [ -n "$p" ]; then kill "$p" 2>/dev/null || true; fi
+  pkill -f "$PY -m recon serve" 2>/dev/null || true
+  pkill -f ".venv/bin/python -m recon serve --host $HOST --port $PORT" 2>/dev/null || true
+  rm -f "$PIDFILE"
+}
+
+_start_bg() {
+  if _up; then echo "already up   $URL"; return 0; fi
+  mkdir -p "$DIR/data"
+  ( cd "$DIR" && setsid nohup "$PY" -m recon serve --host "$HOST" --port "$PORT" >"$LOG" 2>&1 &
+    echo $! >"$PIDFILE" )
+  for _ in $(seq 1 15); do _up && break; sleep 1; done
+  if _up; then echo "up   $URL   (log: recon-platform log)"; else
+    echo "failed to start — tail:" >&2; tail -n 15 "$LOG" >&2; exit 1
+  fi
+}
+
+case "${1:-bg}" in
+  bg|start|"")  _start_bg ;;
+  fg|serve)     cd "$DIR" && exec "$PY" -m recon serve --host "$HOST" --port "$PORT" "${@:2}" ;;
+  status)       if _up; then echo "up   $URL  (pid $(_pid || echo '?'))"; else echo "down $URL"; fi ;;
+  stop)         _stop; echo stopped ;;
+  restart)      _stop; sleep 1; _start_bg ;;
+  log)          exec tail -n "${2:-40}" -f "$LOG" ;;
+  open)         _up || _start_bg; xdg-open "$URL" >/dev/null 2>&1 & ;;
+  *)            cd "$DIR" && exec "$PY" -m recon "$@" ;;
+esac

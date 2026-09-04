@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ engagement.name }}{% endblock %}
+{% block content %}
+<h1>{{ engagement.name }}
+  <span class="badge {{ engagement.status.value }}">{{ engagement.status.value }}</span></h1>
+<p class="muted">{{ engagement.client_name }} &middot; created {{ engagement.created_at.strftime('%Y-%m-%d %H:%M UTC') }}
+  &middot; <a href="/audit">{{ audit_count }} audit entries</a></p>
+
+{% if warnings %}
+<div class="panel">
+  <h2 style="margin-top:0">RoE advisories</h2>
+  <ul class="warnlist">{% for w in warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<div class="panel">
+  <div class="row-actions">
+    {% if not active_engagement or active_engagement.id != engagement.id %}
+    <form class="inline-form" method="post" action="/engagements/{{ engagement.id }}/activate">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <button type="submit">Set as active</button>
+    </form>
+    {% else %}<span class="badge active">active engagement</span>{% endif %}
+
+    <form class="inline-form" method="post" action="/engagements/{{ engagement.id }}/status">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <select name="status" onchange="this.form.submit()">
+        {% for s in EngagementStatus %}
+        <option value="{{ s.value }}" {% if s == engagement.status %}selected{% endif %}>{{ s.value }}</option>
+        {% endfor %}
+      </select>
+    </form>
+
+    {% if engagement.llm_analysis_enabled %}
+    <form class="inline-form" method="post" action="/engagements/{{ engagement.id }}/llm">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="hidden" name="enabled" value="off">
+      <button class="secondary" type="submit">Disable remote LLM</button>
+    </form>
+    {% else %}
+    <form class="inline-form" method="post" action="/engagements/{{ engagement.id }}/llm"
+          onsubmit="return confirm('Enable remote LLM analysis? Correlated recon data for this engagement will be sent to the configured remote endpoint.');">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="hidden" name="enabled" value="on">
+      <button class="secondary" type="submit">Enable remote LLM</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<h2>Stored RoE (hash <code>{{ engagement.roe_config_hash[:16] }}&hellip;</code>)</h2>
+<pre class="roe">{{ engagement.roe_config_yaml }}</pre>
+
+<h2 style="color:var(--err)">Danger zone</h2>
+<div class="panel" style="border-color:var(--err)">
+  <p>Purging permanently deletes this engagement and all its assets, evidence, scan runs,
+  and audit log. This cannot be undone.</p>
+  <form method="post" action="/engagements/{{ engagement.id }}/purge"
+        onsubmit="return confirm('Permanently purge this engagement and ALL its data?');">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <label>Type the engagement name to confirm: <code>{{ engagement.name }}</code></label>
+    <input type="text" name="confirm_name" style="max-width:360px" autocomplete="off">
+    <div style="margin-top:0.8rem"><button class="danger" type="submit">Purge engagement</button></div>
+  </form>
+</div>
+{% endblock %}

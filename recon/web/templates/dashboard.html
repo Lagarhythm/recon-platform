@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+{% if not active_engagement %}
+  <div class="panel">
+    <p>No active engagement. <a href="/engagements">Create or select one</a> to begin.</p>
+  </div>
+{% else %}
+  <div class="grid">
+    <div class="stat"><div class="label">Engagement</div>
+      <div class="value">{{ active_engagement.name }}</div>
+      <div class="muted">{{ active_engagement.client_name }}</div></div>
+    <div class="stat"><div class="label">Status</div>
+      <div class="value"><span class="badge {{ active_engagement.status.value }}">{{ active_engagement.status.value }}</span></div></div>
+    <div class="stat"><div class="label">Authorized window</div>
+      <div class="value">
+        {% if window_status == 'within' %}<span style="color:var(--ok)">within</span>
+        {% elif window_status == 'no_window' %}<span class="muted">none set</span>
+        {% else %}<span style="color:var(--err)">{{ window_status }}</span>{% endif %}
+      </div>
+      {% if active_engagement.authorized_window_start %}
+      <div class="muted">{{ active_engagement.authorized_window_start.strftime('%Y-%m-%d') }}
+        &rarr; {{ active_engagement.authorized_window_end.strftime('%Y-%m-%d') }}</div>
+      {% endif %}
+    </div>
+    <div class="stat"><div class="label">Audit entries</div>
+      <div class="value">{{ audit_count }}</div>
+      <div class="muted"><a href="/audit">view log</a></div></div>
+  </div>
+
+  <h2>Scope</h2>
+  <div class="panel">
+    <div class="grid">
+      <div>
+        <strong>In scope</strong>
+        <ul class="mono">
+          {% for d in roe.scope.in_scope.domains %}<li>{{ d }}</li>{% endfor %}
+          {% for h in roe.scope.in_scope.hosts %}<li>{{ h }}</li>{% endfor %}
+          {% for c in roe.scope.in_scope.cidrs %}<li>{{ c }}</li>{% endfor %}
+        </ul>
+      </div>
+      <div>
+        <strong>Excluded</strong>
+        <ul class="mono">
+          {% for h in roe.scope.excluded.hosts %}<li>{{ h }}</li>{% endfor %}
+          {% for d in roe.scope.excluded.domains %}<li>{{ d }}</li>{% endfor %}
+          {% for c in roe.scope.excluded.cidrs %}<li>{{ c }}</li>{% endfor %}
+          {% if not roe.scope.excluded.hosts and not roe.scope.excluded.domains and not roe.scope.excluded.cidrs %}
+          <li class="muted">none</li>{% endif %}
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  {% if asset_stats and asset_stats.total %}
+  <h2>What we know <span class="muted" style="font-size:0.8rem;font-weight:400">&mdash; click a tile to browse that type</span></h2>
+  <div class="grid">
+    {% for t, n in asset_stats.by_type.items() %}
+    <a class="stat" href="/assets?type={{ t }}">
+      <div class="label">{{ t.replace('_', ' ') }}</div><div class="value">{{ n }}</div>
+    </a>
+    {% endfor %}
+  </div>
+  {% if top_findings %}
+  <div class="panel">
+    <strong>High-value findings</strong>
+    <ul>
+      {% for f in top_findings %}
+      <li><a href="/assets/{{ f.id }}" class="mono">{{ f.value }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  <p><a href="/assets">Browse the full Asset Graph &rarr;</a></p>
+  {% endif %}
+
+  {% if recent_runs %}
+  <h2>Recent scans</h2>
+  <div class="panel">
+    <table>
+      <tr><th>Started</th><th>Modules</th><th>Status</th></tr>
+      {% for r in recent_runs %}
+      <tr>
+        <td class="mono muted">{{ r.started_at.strftime('%m-%d %H:%M') if r.started_at else '-' }}</td>
+        <td class="muted">{{ r.modules_requested | join(', ') }}</td>
+        <td><a href="/scans/{{ r.id }}"><span class="badge {{ r.status.value }}">{{ r.status.value.replace('_',' ') }}</span></a></td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+  <h2>Operational parameters</h2>
+  <div class="panel">
+    <table>
+      <tr><th>Rate limit</th><td>{{ roe.rate_limits.max_requests_per_second }} req/s,
+        {{ roe.rate_limits.max_concurrent_connections }} concurrent</td></tr>
+      <tr><th>Jitter</th><td>{% if roe.evasion.jitter.enabled %}
+        {{ roe.evasion.jitter.min_ms }}&ndash;{{ roe.evasion.jitter.max_ms }} ms
+        {% else %}<span class="muted">disabled</span>{% endif %}</td></tr>
+      <tr><th>User agents</th><td>{{ roe.evasion.user_agents | length }} configured,
+        rotation: {{ roe.evasion.rotation_strategy.value }}</td></tr>
+      <tr><th>Remote LLM analysis</th><td>
+        {% if active_engagement.llm_analysis_enabled %}
+          <span style="color:var(--warn)">ENABLED &mdash; recon data leaves this host</span>
+        {% else %}<span class="muted">disabled (default)</span>{% endif %}
+        &nbsp;<a href="/engagements/{{ active_engagement.id }}">manage</a></td></tr>
+    </table>
+  </div>
+{% endif %}
+
+<h2>Kill switch</h2>
+<div class="panel">
+  {% if kill_switch.engaged %}
+    <p style="color:var(--err)"><strong>ENGAGED</strong> since {{ kill_switch.engaged_at }} &mdash;
+      {{ kill_switch.reason }}</p>
+    <form method="post" action="/system/killswitch/reset">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <button type="submit">Clear kill switch</button>
+    </form>
+  {% else %}
+    <p class="muted">Clear. Active modules permitted to run (subject to scope + RoE).</p>
+    <form method="post" action="/system/killswitch/engage"
+          onsubmit="return confirm('Engage GLOBAL STOP?');">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <input type="text" name="reason" placeholder="reason (optional)" style="max-width:320px">
+      <button class="danger" type="submit">Engage global stop</button>
+    </form>
+  {% endif %}
+</div>
+
+<p class="muted" style="margin-top:2rem">
+  Phase 1 build: engagement, scope, auth, and audit foundation. Recon modules
+  (passive &rarr; active) land in Phases 2&ndash;3.
+</p>
+{% endblock %}

@@ -1,0 +1,16 @@
+# SearXNG backend for the `search` OSINT module.
+#
+#   cd searxng && docker compose up -d
+#
+# Recreating the container (e.g. to change the port) is then just
+# `docker compose up -d --force-recreate` — settings.yml is a tracked file, not
+# a value trapped in an ephemeral volume.
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"      # loopback only — never expose this
+    volumes:
+      - ./config:/etc/searxng      # settings.yml lives here; the rest is generated

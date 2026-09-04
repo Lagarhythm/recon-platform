@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Engagements{% endblock %}
+{% block content %}
+<h1>Engagements</h1>
+
+{% if need_active %}
+<div class="flash warning">Select or create an active engagement to continue.</div>
+{% endif %}
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+<div class="panel">
+  {% if engagements %}
+  <table>
+    <thead><tr><th>Name</th><th>Client</th><th>Status</th><th>Window</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      {% for e in engagements %}
+      <tr>
+        <td><a href="/engagements/{{ e.id }}">{{ e.name }}</a>
+          {% if active_engagement and e.id == active_engagement.id %}
+          <span class="badge active">active</span>{% endif %}</td>
+        <td>{{ e.client_name }}</td>
+        <td><span class="badge {{ e.status.value }}">{{ e.status.value }}</span></td>
+        <td class="muted">{% if e.authorized_window_start %}
+          {{ e.authorized_window_start.strftime('%m-%d') }}&rarr;{{ e.authorized_window_end.strftime('%m-%d') }}
+          {% else %}&mdash;{% endif %}</td>
+        <td class="muted">{{ e.created_at.strftime('%Y-%m-%d') }}</td>
+        <td>
+          {% if not active_engagement or e.id != active_engagement.id %}
+          <form class="inline-form" method="post" action="/engagements/{{ e.id }}/activate">
+            <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+            <button class="secondary" type="submit">Set active</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No engagements yet.</p>
+  {% endif %}
+</div>
+
+<h2>New engagement</h2>
+<div class="panel">
+  <p>Build one with the <a href="/engagements/new"><strong>guided form</strong></a> &mdash;
+  it produces a validated RoE for you. No YAML required.</p>
+  <p><a class="btn" href="/engagements/new">Guided form</a></p>
+</div>
+
+<h2>Advanced: raw RoE document</h2>
+<div class="panel">
+  <p class="hint">Paste or upload an RoE document (YAML, or JSON &mdash; JSON is valid YAML).
+  It is validated, snapshotted, and hashed on creation. This document is the single source
+  of truth for scope and evasion. See <code>engagements/example.yaml</code> for the schema.</p>
+  <form method="post" action="/engagements" enctype="multipart/form-data">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    <label>RoE document</label>
+    <textarea name="roe_yaml" placeholder="engagement:&#10;  name: ...&#10;  client: ...&#10;scope:&#10;  in_scope:&#10;    domains: [&quot;example.com&quot;, &quot;*.example.com&quot;]"></textarea>
+    <label>...or upload file</label>
+    <input type="file" name="roe_file" accept=".yaml,.yml,.json,.txt">
+    <div style="margin-top:1rem"><button type="submit">Create engagement</button></div>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ asset.value }}{% endblock %}
+{% block content %}
+<p class="muted"><a href="/assets">&larr; Asset Graph</a></p>
+<h1><span class="muted">{{ asset.type.value }}</span> {{ asset.value }}</h1>
+<p>
+  <span class="badge {{ asset.interest_level.value }}">{{ asset.interest_level.value }}</span>
+  <span class="badge {{ asset.in_scope_status.value }}">{{ asset.in_scope_status.value }}</span>
+  <span class="muted">confidence {{ '%.2f' % asset.confidence_score }}</span>
+  <span class="muted">&middot; first seen {{ asset.first_seen.strftime('%Y-%m-%d %H:%M') }}
+    &middot; last seen {{ asset.last_seen.strftime('%Y-%m-%d %H:%M') }}</span>
+</p>
+
+{% if rels_out or rels_in %}
+<h2>Relationships</h2>
+<div class="panel">
+  <ul>
+    {% for rel, target in rels_out %}
+    <li><span class="muted">{{ rel.relationship_type.value }}</span> &rarr;
+      <a href="/assets/{{ target.id }}" class="mono">{{ target.value }}</a>
+      <span class="muted">({{ target.type.value }})</span></li>
+    {% endfor %}
+    {% for rel, source in rels_in %}
+    <li><a href="/assets/{{ source.id }}" class="mono">{{ source.value }}</a>
+      <span class="muted">({{ source.type.value }})</span>
+      <span class="muted">{{ rel.relationship_type.value }}</span> &rarr; this</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<h2>Evidence ({{ evidence | length }})</h2>
+<div class="panel">
+  {% if evidence %}
+  <table>
+    <thead><tr><th>When</th><th>Module</th><th>Subject</th><th>Polarity</th><th>Summary</th></tr></thead>
+    <tbody>
+      {% for ev in evidence %}
+      <tr>
+        <td class="mono muted">{{ ev.discovered_at.strftime('%m-%d %H:%M:%S') }}</td>
+        <td>{{ ev.source_module }}</td>
+        <td class="mono muted">{{ ev.subject_type }}</td>
+        <td>{% if ev.polarity.value == 'absent' %}<span style="color:var(--warn)">absent</span>
+            {% else %}present{% endif %}</td>
+        <td>{{ ev.summary or '' }}
+          <details><summary class="muted">raw</summary>
+            <pre class="mono" style="font-size:0.75rem;white-space:pre-wrap">{{ ev.raw_data | tojson(indent=2) }}</pre>
+          </details>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No evidence attached.</p>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}First-run setup{% endblock %}
+{% block content %}
+<div class="auth-wrap">
+  <h1>Create operator account</h1>
+  <p class="hint">This is a single-operator tool. No account exists yet &mdash; create the one
+  that will gate all access. There is no password recovery; store it in your password manager.</p>
+  <div class="panel">
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <form method="post" action="/setup">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <label>Username</label>
+      <input type="text" name="username" autocomplete="username" required autofocus>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="new-password" required>
+      <p class="hint">Minimum 12 characters, at least 3 of: lowercase, uppercase, digit, symbol.</p>
+      <label>Confirm password</label>
+      <input type="password" name="password_confirm" autocomplete="new-password" required>
+      <div style="margin-top:1rem"><button type="submit">Create account</button></div>
+    </form>
+  </div>
+</div>
+{% endblock %}

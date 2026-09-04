@@ -1,0 +1,55 @@
+# Example Rules of Engagement document.
+# This file is the single source of truth for scope AND evasion behaviour for
+# an engagement. It is validated, snapshotted, and hashed when the engagement
+# is created; the hash is recorded on every audit-log entry.
+
+engagement:
+  name: "Example Corp - Q3 External Pentest"
+  client: "Example Corp"
+  authorized_window:
+    start: "2026-09-01T00:00:00Z"
+    end: "2026-09-30T23:59:59Z"
+
+scope:
+  in_scope:
+    domains:
+      - "example.com"
+      - "*.example.com"        # wildcard authorises subdomains explicitly
+    cidrs:
+      - "203.0.113.0/24"
+    hosts: []
+  excluded:
+    hosts:
+      - "mail.example.com"     # third-party hosted mail, out of scope
+    domains: []
+    cidrs:
+      - "203.0.113.128/28"     # production payment infrastructure
+
+rate_limits:
+  max_requests_per_second: 10
+  max_concurrent_connections: 20
+
+evasion:
+  jitter:
+    enabled: true
+    min_ms: 100
+    max_ms: 1500
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+  rotation_strategy: "round_robin"   # or "random"
+
+llm:
+  # Off by default. When true, correlated recon data for this engagement is
+  # sent to the remote OpenAI-compatible endpoint configured in app settings.
+  analysis_enabled: false
+
+# osint:
+#   # Company OSINT (crt.sh-by-org, RDAP/WHOIS, GitHub, Wayback). Queries public
+#   # third-party sources only - never the target. When enabled, `scope:` may be
+#   # omitted entirely (OSINT-only engagement). seed_domains are pivot points,
+#   # NOT scan scope - list a domain under scope.in_scope to also scan it.
+#   enabled: true
+#   company: "Example Corp"
+#   seed_domains: ["example.com"]
+#   github_org: null        # explicit org slug, or null to search for it

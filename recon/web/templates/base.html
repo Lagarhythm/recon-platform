@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>{% block title %}Recon Platform{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{% if current_user %}
+  {% if kill_switch and kill_switch.engaged %}
+  <div class="killbanner">
+    <span>GLOBAL STOP ENGAGED &mdash; {{ kill_switch.reason }}
+      {% if kill_switch.engaged_by %}(by {{ kill_switch.engaged_by }}){% endif %}</span>
+    <form class="inline-form" method="post" action="/system/killswitch/reset">
+      <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+      <button class="secondary" type="submit">Clear</button>
+    </form>
+  </div>
+  {% endif %}
+  <header class="topbar">
+    <span class="brand">RECON</span>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/engagements">Engagements</a>
+      <a href="/scans">Scans</a>
+      <a href="/assets">Assets</a>
+      <a href="/reports">Reports</a>
+      <a href="/audit">Audit Log</a>
+    </nav>
+    <div class="right">
+      {% if active_engagement %}
+        <span class="engagement-chip">{{ active_engagement.name }}
+          <span class="badge {{ active_engagement.status.value }}">{{ active_engagement.status.value }}</span>
+        </span>
+      {% else %}
+        <span class="engagement-chip muted">no active engagement</span>
+      {% endif %}
+      <form class="inline-form" method="post" action="/system/killswitch/engage"
+            onsubmit="return confirm('Engage GLOBAL STOP? All active modules will halt immediately.');">
+        <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+        <button class="danger" type="submit">STOP</button>
+      </form>
+      <a href="/account">{{ current_user.username }}</a>
+      <form class="inline-form" method="post" action="/logout">
+        <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+        <button class="secondary" type="submit">Sign out</button>
+      </form>
+    </div>
+  </header>
+{% endif %}
+
+<main>
+  {% if flashes %}
+  <div class="flashes">
+    {% for category, message in flashes %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

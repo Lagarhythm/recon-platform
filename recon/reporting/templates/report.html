@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Recon Report - {{ engagement.name }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 16mm 14mm 18mm;
+    @bottom-center { content: "{{ engagement.name }} - confidential"; font-size: 8pt; color: #999; }
+    @bottom-right  { content: counter(page) " / " counter(pages); font-size: 8pt; color: #999; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 10.5pt/1.5 "Helvetica Neue", Arial, "Segoe UI", Roboto, sans-serif;
+    color: #1c1c1c; margin: 0;
+  }
+  @media screen {
+    body { max-width: 62rem; margin: 2rem auto; padding: 0 1.4rem; font-size: 13px; }
+  }
+  h1 { font-size: 1.7em; margin: 0 0 .1em; }
+  h2 {
+    font-size: 1.15em; margin: 1.8em 0 .5em; padding-bottom: .2em;
+    border-bottom: 2px solid #222; page-break-after: avoid;
+  }
+  h3 { font-size: .98em; margin: 1.1em 0 .35em; color: #333; page-break-after: avoid; }
+  p  { margin: .4em 0; }
+  .muted { color: #666; }
+  .sub  { color: #666; font-size: .9em; margin: 0 0 .2em; }
+  code, .mono {
+    font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: .88em; overflow-wrap: anywhere; word-break: break-word;
+  }
+  code { background: #f1f1f2; padding: 0 .2em; border-radius: 2px; }
+
+  table {
+    width: 100%; border-collapse: collapse; margin: .5em 0 1em;
+    font-size: .9em; table-layout: fixed;
+  }
+  th, td {
+    text-align: left; padding: .35em .5em; border-bottom: 1px solid #dcdcdc;
+    vertical-align: top; overflow-wrap: anywhere;
+  }
+  th { background: #f4f4f5; font-weight: 600; font-size: .82em;
+       text-transform: uppercase; letter-spacing: .3px; color: #555; }
+  tr { page-break-inside: avoid; }
+  td.n { white-space: nowrap; overflow-wrap: normal; }
+
+  .pill {
+    display: inline-block; padding: .02em .4em; border-radius: 3px;
+    font-size: .78em; font-weight: 600; border: 1px solid; white-space: nowrap;
+  }
+  .high_value { color: #b30000; border-color: #b30000; background:#fff5f5; }
+  .notable    { color: #1064a8; border-color: #1064a8; background:#f2f8ff; }
+  .informational { color: #777; border-color: #ccc; }
+  .flagged, .excluded { color: #a25a00; border-color: #a25a00; background:#fff8ee; }
+  .in_scope { color: #0a7d33; border-color: #0a7d33; }
+  .na, .n\/a { color: #888; border-color: #ccc; }
+
+  .cards { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8em 0 1.2em; }
+  .card {
+    border: 1px solid #d8d8d8; border-radius: 5px; padding: .45rem .5rem;
+    flex: 1 1 4.5rem; text-align: center;
+  }
+  .card .num { font-size: 1.4em; font-weight: 700; line-height: 1.1; }
+  .card .lbl { font-size: .78em; color: #666; text-transform: uppercase; letter-spacing: .3px; }
+
+  .box {
+    border: 1px solid #ddd; border-left: 3px solid #1064a8; border-radius: 3px;
+    padding: .6rem .9rem; margin: .6em 0; page-break-inside: avoid;
+  }
+  .box.warn { border-left-color: #a25a00; background: #fffaf3; }
+  ul.tight { margin: .3em 0; padding-left: 1.2em; }
+  ul.tight li { margin: .15em 0; }
+  .kv { display: grid; grid-template-columns: 8.5rem 1fr; gap: .15em .8rem; font-size: .92em; }
+  .kv dt { color: #666; }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .empty { color: #999; font-style: italic; }
+
+  footer {
+    margin-top: 2.5em; border-top: 1px solid #ccc; padding-top: .6em;
+    font-size: .82em; color: #888;
+  }
+  .toc { columns: 2; font-size: .9em; margin: .5em 0 1.5em; }
+  .toc a { color: #1064a8; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<h1>Reconnaissance Report</h1>
+<p class="sub">
+  {{ engagement.name }} &middot; {{ engagement.client }} &middot; generated {{ meta.generated_at }}
+  {% if meta.redaction == 'client' %} &middot; <strong>CLIENT COPY (redacted)</strong>{% endif %}
+</p>
+<p class="sub">
+  RoE <code>{{ engagement.roe_hash[:20] }}&hellip;</code>
+  {% if engagement.authorized_window and engagement.authorized_window.start %}
+    &middot; authorised {{ engagement.authorized_window.start[:10] }} &rarr;
+    {{ engagement.authorized_window.end[:10] }}{% endif %}
+</p>
+
+<div class="cards">
+  <div class="card"><div class="num">{{ summary.asset_count }}</div><div class="lbl">assets</div></div>
+  <div class="card"><div class="num">{{ summary.finding_count }}</div><div class="lbl">findings</div></div>
+  <div class="card"><div class="num">{{ summary.high_value_count }}</div><div class="lbl">high value</div></div>
+  <div class="card"><div class="num">{{ sect.hosts | length }}</div><div class="lbl">hosts</div></div>
+  <div class="card"><div class="num">{{ summary.scan_runs }}</div><div class="lbl">scans</div></div>
+  <div class="card"><div class="num">{{ summary.audit_entries }}</div><div class="lbl">audited reqs</div></div>
+</div>
+
+{% if analyst and analyst.summary %}
+<h2 id="assessment">Analyst assessment{% if analyst.model %}
+  <span class="muted" style="font-weight:400;font-size:.8em">&mdash; {{ analyst.model }}</span>{% endif %}</h2>
+<p>{{ analyst.summary }}</p>
+{% if analyst.priorities %}
+<h3>Priorities</h3>
+<ol class="tight">{% for p in analyst.priorities %}<li>{{ p }}</li>{% endfor %}</ol>
+{% endif %}
+{% if analyst.next_steps %}
+<h3>Suggested next recon steps</h3>
+<ul class="tight">{% for s in analyst.next_steps %}<li>{{ s }}</li>{% endfor %}</ul>
+{% endif %}
+{% endif %}
+
+{# ============================ ORGANISATION PROFILE ============================ #}
+{% if sect.has_osint %}
+<h2 id="org">Organisation profile</h2>
+
+{% set orgs = sect.by_type.get('organization', []) %}
+{% if orgs %}
+<h3>Organisations</h3>
+<table>
+  <colgroup><col style="width:40%"><col><col style="width:5rem"></colgroup>
+  <thead><tr><th>Name</th><th>Seen via</th><th>Conf.</th></tr></thead>
+  {% for o in orgs %}
+  <tr><td>{{ o.value }}</td>
+      <td class="muted">{% for e in o.evidence[:2] %}{{ e.summary }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
+      <td class="n">{{ o.confidence | pct }}%</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% set nets = sect.by_type.get('netblock', []) %}
+{% if nets %}
+<h3>Network footprint</h3>
+<table>
+  <colgroup><col style="width:12rem"><col></colgroup>
+  <thead><tr><th>Netblock</th><th>Detail</th></tr></thead>
+  {% for n in nets %}
+  <tr><td class="mono">{{ n.value }}</td>
+      <td class="muted">{% for e in n.evidence[:1] %}{{ e.summary }}{% endfor %}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% set people = sect.by_type.get('person', []) %}
+{% if people %}
+<h3>People ({{ people | length }})</h3>
+<table>
+  <colgroup><col style="width:35%"><col></colgroup>
+  <thead><tr><th>Name / handle</th><th>Context</th></tr></thead>
+  {% for p in people %}
+  <tr><td>{{ p.value }}</td>
+      <td class="muted">{% for e in p.evidence[:1] %}{{ e.summary }}{% endfor %}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% set emails = sect.by_type.get('email', []) %}
+{% if emails or sect.email_formats %}
+<h3>Email</h3>
+<ul class="tight">
+  {% for e in emails %}<li><code>{{ e.value }}</code>
+    <span class="muted">&mdash; {% for ev in e.evidence[:1] %}{{ ev.summary }}{% endfor %}</span></li>{% endfor %}
+  {% for f in sect.email_formats %}<li>format: <code>{{ f }}</code></li>{% endfor %}
+</ul>
+{% endif %}
+
+{% set repos = sect.by_type.get('repository', []) %}
+{% if repos %}
+<h3>Repositories ({{ repos | length }})</h3>
+<table>
+  <colgroup><col style="width:45%"><col></colgroup>
+  <thead><tr><th>Repository</th><th>Notes</th></tr></thead>
+  {% for r in repos %}
+  {% set rd = (r.evidence[0].raw_data if r.evidence else {}) or {} %}
+  <tr><td class="mono">{{ r.value | urlpath | replace('/', '', 1) }}</td>
+      <td class="muted">{{ rd.get('language') or '' }}{% if rd.get('description') %} &mdash; {{ rd.get('description') }}{% endif %}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endif %}
+
+{# ============================ HOSTS & DOMAINS ============================ #}
+<h2 id="hosts">Hosts &amp; domains</h2>
+{% if sect.hosts or sect.ips %}
+<table>
+  <colgroup><col style="width:45%"><col style="width:6rem"><col style="width:6rem"><col style="width:5rem"></colgroup>
+  <thead><tr><th>Host</th><th>Type</th><th>Scope</th><th>Interest</th></tr></thead>
+  {% for a in sect.hosts %}
+  <tr><td class="mono">{{ a.value }}</td><td class="muted n">{{ a.type }}</td>
+      <td><span class="pill {{ a.scope | replace("/","") }}">{{ a.scope }}</span></td>
+      <td><span class="pill {{ a.interest }}">{{ a.interest }}</span></td></tr>
+  {% endfor %}
+  {% for a in sect.ips %}
+  <tr><td class="mono">{{ a.value }}</td><td class="muted n">ip</td>
+      <td><span class="pill {{ a.scope | replace("/","") }}">{{ a.scope }}</span></td>
+      <td><span class="pill {{ a.interest }}">{{ a.interest }}</span></td></tr>
+  {% endfor %}
+</table>
+{% else %}<p class="empty">No hosts or domains recorded.</p>{% endif %}
+
+{# ============================ SERVICES ============================ #}
+{% if sect.svc_by_host %}
+<h2 id="services">Services</h2>
+{% for host, svcs in sect.svc_by_host.items() %}
+<h3 class="mono">{{ host }}</h3>
+<table>
+  <colgroup><col style="width:7rem"><col></colgroup>
+  <thead><tr><th>Port</th><th>Service</th></tr></thead>
+  {% for s in svcs %}
+  {% set sd = (s.evidence[0].raw_data if s.evidence else {}) or {} %}
+  <tr><td class="mono n">{{ s.value.split(':')[-1] }}</td>
+      <td>{{ sd.get('name') or '?' }}{% if sd.get('product') %} &mdash; {{ sd.get('product') }}{% endif %}
+          {% if sd.get('version') %} {{ sd.get('version') }}{% endif %}</td></tr>
+  {% endfor %}
+</table>
+{% endfor %}
+{% endif %}
+
+{# ============================ WEB SURFACE ============================ #}
+{% if sect.web_by_host or sect.by_type.get('document') %}
+<h2 id="web">Web surface</h2>
+
+{% set docs = sect.by_type.get('document', []) %}
+{% if docs %}
+<h3>Documents &amp; exposed files ({{ docs | length }})</h3>
+<table>
+  <colgroup><col><col style="width:6rem"></colgroup>
+  <thead><tr><th>URL</th><th>Interest</th></tr></thead>
+  {% for d in docs %}
+  <tr><td class="mono">{{ d.value | deurl }}</td>
+      <td><span class="pill {{ d.interest | replace("/","") }}">{{ d.interest }}</span></td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% for host, urls in sect.web_by_host.items() %}
+{% set notable_urls = urls | selectattr('interest', 'in', ['high_value', 'notable']) | list %}
+{% set shown = notable_urls if notable_urls else urls %}
+<h3 class="mono">{{ host }}
+  <span class="muted" style="font-weight:400">&mdash;
+  {{ urls | length }} path{{ 's' if urls|length != 1 }}
+  {%- if notable_urls %}, {{ notable_urls|length }} notable shown{% endif %}</span></h3>
+<table>
+  <colgroup><col><col style="width:6rem"></colgroup>
+  <thead><tr><th>Path</th><th>Interest</th></tr></thead>
+  {% for u in shown[:40] %}
+  <tr><td class="mono">{{ u.value | urlpath | deurl }}</td>
+      <td><span class="pill {{ u.interest }}">{{ u.interest }}</span></td></tr>
+  {% endfor %}
+  {% if shown | length > 40 %}<tr><td colspan="2" class="muted">&hellip; and {{ shown|length - 40 }} more (see inventory)</td></tr>{% endif %}
+</table>
+{% endfor %}
+{% endif %}
+
+{# ============================ FINDINGS ============================ #}
+<h2 id="findings">Findings</h2>
+{% set any_f = namespace(v=false) %}
+{% for level, items in sect.findings_by_interest %}
+  {% if items %}
+  {% set any_f.v = true %}
+  <h3>{{ level.replace('_',' ') | title }} ({{ items | length }})</h3>
+  {% for f in items %}
+  <div class="box {% if level == 'high_value' %}warn{% endif %}">
+    <div><code>{{ f.value }}</code>
+      <span class="pill {{ f.interest }}">{{ f.interest }}</span>
+      <span class="muted">{{ f.type }} &middot; {{ f.confidence | pct }}% &middot;
+        <span class="pill {{ f.scope | replace("/","") }}">{{ f.scope }}</span></span></div>
+    {% if f.evidence %}
+    <ul class="tight">
+      {% for e in f.evidence[:6] %}<li>{{ e.summary or e.subject_type }}
+        <span class="muted">({{ e.module }})</span></li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+{% endfor %}
+{% if not any_f.v %}<p class="empty">No notable findings.</p>{% endif %}
+
+{# ============================ MISSING CONTROLS ============================ #}
+{% if sect.neg_by_control %}
+<h2 id="controls">Missing controls</h2>
+{% for control, items in sect.neg_by_control.items() %}
+<h3>{{ control }}</h3>
+<ul class="tight">
+  {% for n in items %}<li>{{ n.summary }} <span class="muted">({{ n.module }})</span></li>{% endfor %}
+</ul>
+{% endfor %}
+{% endif %}
+
+{# ============================ RELATIONSHIPS ============================ #}
+{% if relationships %}
+<h2 id="rels">Relationships</h2>
+<table>
+  <colgroup><col style="width:40%"><col style="width:9rem"><col></colgroup>
+  <thead><tr><th>Source</th><th>Relationship</th><th>Target</th></tr></thead>
+  {% for r in relationships %}
+  <tr><td class="mono">{{ r.source }}</td><td class="muted">{{ r.type }}</td>
+      <td class="mono">{{ r.target }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{# ============================ ASSET INVENTORY ============================ #}
+<h2 id="inventory">Full asset inventory</h2>
+<p class="muted">Every correlated asset, grouped by type. Long lists are capped at 50 &mdash; the JSON export has the complete set.</p>
+{% for atype, items in sect.by_type | dictsort %}
+<h3>{{ atype.replace('_',' ') }} ({{ items | length }})</h3>
+<table>
+  <colgroup><col><col style="width:5rem"><col style="width:4rem"><col style="width:6rem"></colgroup>
+  <thead><tr><th>Value</th><th>Interest</th><th>Conf.</th><th>Scope</th></tr></thead>
+  {% for a in items[:50] %}
+  <tr><td class="mono">{{ a.value | deurl }}</td>
+      <td><span class="pill {{ a.interest }}">{{ a.interest }}</span></td>
+      <td class="n">{{ a.confidence | pct }}%</td>
+      <td><span class="pill {{ a.scope | replace("/","") }}">{{ a.scope }}</span></td></tr>
+  {% endfor %}
+  {% if items | length > 50 %}<tr><td colspan="4" class="muted">&hellip; and {{ items|length - 50 }} more</td></tr>{% endif %}
+</table>
+{% endfor %}
+
+{# ============================ SCAN ACTIVITY ============================ #}
+<h2 id="scans">Scan activity</h2>
+<table>
+  <colgroup><col style="width:6rem"><col style="width:6rem"><col><col style="width:9rem"></colgroup>
+  <thead><tr><th>Run</th><th>Status</th><th>Modules</th><th>Started</th></tr></thead>
+  {% for s in scan_runs %}
+  <tr><td class="mono muted n">{{ s.id[:8] }}</td><td>{{ s.status }}</td>
+      <td class="muted">{{ s.modules | join(', ') }}</td>
+      <td class="muted n">{{ (s.started_at or '')[:16] }}</td></tr>
+  {% endfor %}
+</table>
+
+<footer>
+  Generated by Integrated Reconnaissance Platform v{{ meta.tool_version }} &mdash;
+  authorised-use reconnaissance record.
+  {% if meta.redaction == 'client' %}
+  Internal paths, raw request/response bodies, working notes and the stored RoE
+  have been redacted from this copy.{% endif %}
+</footer>
+</body>
+</html>

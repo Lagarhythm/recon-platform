@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Asset Graph{% endblock %}
+{% block content %}
+<h1>Asset Graph &mdash; {{ active_engagement.name }}</h1>
+
+<div class="grid">
+  <a class="stat" href="/assets"><div class="label">Total assets</div><div class="value">{{ stats.total }}</div></a>
+  <a class="stat" href="/assets?type=finding"><div class="label">Findings</div><div class="value">{{ stats.findings }}</div></a>
+  <a class="stat" href="/assets?interest=high_value"><div class="label">High value</div>
+    <div class="value">{{ stats.by_interest.get('high_value', 0) }}</div></a>
+  <a class="stat" href="/assets?scope=flagged"><div class="label">Flagged / excluded</div>
+    <div class="value">{{ stats.by_scope.get('flagged', 0) + stats.by_scope.get('excluded', 0) }}</div></a>
+</div>
+
+<div class="panel">
+  <form method="get" action="/assets" class="row-actions">
+    <select name="type">
+      <option value="">any type</option>
+      {% for t in AssetType %}
+      <option value="{{ t.value }}" {% if filters.type == t.value %}selected{% endif %}>{{ t.value }}
+        ({{ stats.by_type.get(t.value, 0) }})</option>
+      {% endfor %}
+    </select>
+    <select name="interest">
+      <option value="">any interest</option>
+      {% for i in InterestLevel %}
+      <option value="{{ i.value }}" {% if filters.interest == i.value %}selected{% endif %}>{{ i.value }}</option>
+      {% endfor %}
+    </select>
+    <select name="scope">
+      <option value="">any scope</option>
+      {% for s in ScopeStatus %}
+      <option value="{{ s.value }}" {% if filters.scope == s.value %}selected{% endif %}>{{ s.value }}</option>
+      {% endfor %}
+    </select>
+    <input type="text" name="q" value="{{ filters.q }}" placeholder="search value" style="max-width:200px">
+    <button type="submit">Filter</button>
+    <a class="btn secondary" href="/assets">Clear</a>
+  </form>
+</div>
+
+<div class="panel">
+  {% if assets %}
+  <p class="muted" style="margin-top:0">
+    Showing {{ assets|length }}{% if filters.type or filters.interest or filters.scope or filters.q %}
+    filtered{% endif %} asset{{ 's' if assets|length != 1 }}
+    {%- if filters.type %} &middot; type <strong>{{ filters.type }}</strong>{% endif %}
+    {%- if filters.interest %} &middot; interest <strong>{{ filters.interest }}</strong>{% endif %}
+    {%- if filters.scope %} &middot; scope <strong>{{ filters.scope }}</strong>{% endif %}
+  </p>
+  <div class="table-wrap">
+  <table style="table-layout:fixed">
+    <colgroup><col style="width:8rem"><col><col style="width:6rem"><col style="width:5rem"><col style="width:6rem"><col style="width:7rem"></colgroup>
+    <thead><tr><th>Type</th><th>Value</th><th>Interest</th><th>Conf.</th><th>Scope</th><th>Last seen</th></tr></thead>
+    <tbody>
+      {% for a in assets %}
+      <tr>
+        <td class="muted nowrap">{{ a.type.value.replace('_',' ') }}</td>
+        <td class="mono"><a href="/assets/{{ a.id }}">{{ a.value }}</a></td>
+        <td><span class="badge {{ a.interest_level.value }}">{{ a.interest_level.value }}</span></td>
+        <td class="nowrap">
+          <span title="{{ '%.2f' % a.confidence_score }}">
+          {%- set pct = (a.confidence_score * 100) | round -%}
+          {{ pct }}%</span>
+        </td>
+        <td><span class="badge {{ a.in_scope_status.value }}">{{ a.in_scope_status.value }}</span></td>
+        <td class="muted nowrap">{{ a.last_seen.strftime('%m-%d %H:%M') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if assets | length == per_page %}
+  <p><a class="btn secondary" href="/assets?page={{ page + 1 }}&type={{ filters.type }}&interest={{ filters.interest }}&scope={{ filters.scope }}&q={{ filters.q }}">Next page &rarr;</a></p>
+  {% endif %}
+  {% else %}
+  <p class="muted">No assets yet. Run a scan from the <a href="/scans">Scans</a> page.</p>
+  {% endif %}
+</div>
+{% endblock %}

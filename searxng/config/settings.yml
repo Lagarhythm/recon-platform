@@ -1,0 +1,59 @@
+# Recon-Tool SearXNG config. Docs: https://docs.searxng.org/admin/settings/
+#
+# Hardened for use as an unattended dork backend. The big engines (Google,
+# Startpage, Brave, DuckDuckGo) CAPTCHA / rate-limit a single residential IP
+# within a handful of queries, so we lean on the ones that tolerate it (Bing,
+# Qwant, Mojeek) and let SearXNG suspend a blocked engine instead of retrying
+# it into the ground.
+use_default_settings: true
+
+server:
+  secret_key: "CHANGE-ME-openssl-rand-hex-32"
+  limiter: false          # off => the JSON API is reachable without a challenge
+  public_instance: false
+  image_proxy: true
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json                # required for Recon-Tool's `search` module
+  # how long a hard failure sidelines an engine (seconds) - keep it off our back
+  suspended_times:
+    SearxEngineAccessDenied: 3600
+    SearxEngineCaptcha: 3600
+    SearxEngineTooManyRequests: 1800
+    cf_SearxEngineCaptcha: 3600
+    recaptcha_SearxEngineCaptcha: 3600
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  retries: 1
+
+engines:
+  # --- enabled: answer reliably from a residential IP AND honour site: /
+  #     filetype: / inurl: / intitle: operators (verified 2026-09-03) ---
+  - name: bing
+    disabled: false
+  - name: qwant
+    disabled: false
+    timeout: 8.0
+  - name: mojeek
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+    timeout: 10.0          # flaky (ConnectTimeout to html.duckduckgo.com) - keep as a bonus
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
+  # --- disabled: need an API key, or CAPTCHA / rate-limit within a few queries ---
+  - name: google cse
+    disabled: true
+  - name: startpage
+    disabled: true
+  - name: brave
+    disabled: true

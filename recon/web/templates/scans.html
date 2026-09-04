@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Scans{% endblock %}
+{% block content %}
+<h1>Scans &mdash; {{ active_engagement.name }}</h1>
+
+<h2>New scan</h2>
+<div class="panel">
+  <p class="hint">OSINT modules query public third-party sources only (no target contact).
+  Passive modules run next and stop at a checkpoint before any active module fires.
+  Pick what to run:</p>
+  <form method="post" action="/scans">
+    <input type="hidden" name="{{ csrf_field }}" value="{{ csrf_token }}">
+    {% set osint = modules | selectattr('phase.value', 'equalto', 'osint') | list %}
+    {% set passive = modules | selectattr('phase.value', 'equalto', 'passive') | list %}
+    {% set active = modules | selectattr('phase.value', 'equalto', 'active') | list %}
+    {% if osint %}
+    <fieldset style="border:1px solid var(--border);border-radius:4px;padding:0.8rem 1rem;margin-bottom:0.8rem">
+      <legend class="muted">OSINT &mdash; third-party sources only</legend>
+      {% for m in osint %}
+      <label style="display:block;margin:0.3rem 0">
+        <input type="checkbox" name="modules" value="{{ m.name }}" checked>
+        <strong>{{ m.name }}</strong> &mdash; <span class="muted">{{ m.description }}</span>
+      </label>
+      {% endfor %}
+    </fieldset>
+    {% endif %}
+    <fieldset style="border:1px solid var(--border);border-radius:4px;padding:0.8rem 1rem;margin-bottom:0.8rem">
+      <legend class="muted">Passive</legend>
+      {% for m in passive %}
+      <label style="display:block;margin:0.3rem 0">
+        <input type="checkbox" name="modules" value="{{ m.name }}" checked>
+        <strong>{{ m.name }}</strong> &mdash; <span class="muted">{{ m.description }}</span>
+      </label>
+      {% endfor %}
+      {% if not passive %}<span class="muted">none registered</span>{% endif %}
+    </fieldset>
+    <fieldset style="border:1px solid var(--border);border-radius:4px;padding:0.8rem 1rem">
+      <legend class="muted">Active</legend>
+      {% for m in active %}
+      <label style="display:block;margin:0.3rem 0">
+        <input type="checkbox" name="modules" value="{{ m.name }}">
+        <strong>{{ m.name }}</strong> &mdash; <span class="muted">{{ m.description }}
+        {% if m.requires_binary %}(needs <code>{{ m.requires_binary }}</code>){% endif %}</span>
+      </label>
+      {% endfor %}
+      {% if not active %}<span class="muted">none registered yet (Phase 3)</span>{% endif %}
+    </fieldset>
+    <label style="display:block;margin-top:0.8rem">
+      <input type="checkbox" name="allow_out_of_scope" value="on">
+      Allow requests to flagged / excluded targets (audited with an override flag)
+    </label>
+    <div style="margin-top:1rem"><button type="submit">Start scan</button></div>
+  </form>
+</div>
+
+<h2>Scan history</h2>
+<div class="panel">
+  {% if runs %}
+  <table>
+    <thead><tr><th>Started</th><th>Modules</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <td class="mono">{{ r.started_at.strftime('%Y-%m-%d %H:%M') if r.started_at else '-' }}</td>
+        <td class="muted">{{ r.modules_requested | join(', ') }}</td>
+        <td><span class="badge {{ r.status.value }}">{{ r.status.value.replace('_',' ') }}</span></td>
+        <td class="muted">{{ (r.modules_completed or []) | length }}/{{ r.modules_requested | length }}</td>
+        <td><a href="/scans/{{ r.id }}">view</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No scans yet.</p>{% endif %}
+</div>
+{% endblock %}
