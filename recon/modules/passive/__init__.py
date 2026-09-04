@@ -8,4 +8,6 @@ from recon.modules.passive import (  # noqa: F401
     internetdb,
     js_analyzer,
     probe_http,
+    subdomain_permute,
+    subdomain_recurse,
 )

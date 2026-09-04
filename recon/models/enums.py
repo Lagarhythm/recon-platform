@@ -84,6 +84,8 @@ class RelationshipType(str, enum.Enum):
     DISCOVERED_VIA = "discovered_via"
     SUBDOMAIN_OF = "subdomain_of"
     SERVES = "serves"
+    #: a permuted / typo name is an alias of the origin name it was derived from
+    ALIAS_OF = "alias_of"
     # OSINT
     OWNS = "owns"
     EMPLOYED_BY = "employed_by"

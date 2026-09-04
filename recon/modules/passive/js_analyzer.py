@@ -13,7 +13,7 @@ import re
 from collections import Counter
 
 from recon.models.enums import ModulePhase
-from recon.modules._live_hosts import _host_of, live_hosts
+from recon.modules._live_hosts import _host_of, live_hosts, probed_hosts
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 from recon.net.http_client import ReconRequestError, ScopeViolation
@@ -266,6 +266,7 @@ class JSAnalyzerModule(ReconModule):
         # `.js` URLs picked up from `known_values("url")` (e.g. a wayback hit)
         # may point at a host that is no longer up. If probe_http ran, only keep
         # the ones on a host it confirmed answers HTTP; otherwise keep them all.
+        probe_ran = bool(await probed_hosts(ctx))
         live = await live_hosts(ctx)
         for url in await ctx.known_values("url"):
             if not url:
@@ -273,7 +274,7 @@ class JSAnalyzerModule(ReconModule):
             path = url.split("?", 1)[0].split("#", 1)[0].lower()
             if not path.endswith((".js", ".mjs")) or url in seen_urls:
                 continue
-            if live and _host_of(url) not in live:
+            if probe_ran and _host_of(url) not in live:
                 continue
             seen_urls.add(url)
             targets.append((url, None))

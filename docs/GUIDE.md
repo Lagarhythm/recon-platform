@@ -332,14 +332,18 @@ All calls are audited as `n/a` scope and rate-limited.
 
 ### Passive phase
 
-Touch the target as a normal client would (or, for `internetdb`, a third-party
-dataset — no target traffic). 15-min cap each. Chain order:
-`ct_subdomains → dns → internetdb → probe_http → http_analyzer → crawler → js_analyzer`.
+Touch the target as a normal client would (or, for `internetdb` / `subdomain_recurse`,
+a third-party dataset — no target traffic). 15-min cap each. Rough order:
+`ct_subdomains / subdomain_recurse → dns / subdomain_permute → internetdb → probe_http → http_analyzer → crawler → js_analyzer`
+(subdomain expansion feeds the graph; correlation + the active phase see every
+name even if same-run probing/crawling doesn't).
 
 | Module | Needs | What it does | Notes |
 |---|---|---|---|
 | **`dns`** | `in_scope.domains` | Resolves A/AAAA/CNAME/MX/NS/TXT/SOA/CAA for each apex + known host. Flags missing DNSSEC. Feeds `port_scan`/`dns_axfr`/`subdomain_brute`. | Has a per-resolver circuit breaker; tighter timeouts for apex vs. host record types. |
 | **`ct_subdomains`** | `in_scope.domains` | crt.sh CT logs → `subdomain` assets. | 90 s timeout. Overlaps `ct_org` — running both is fine, they dedupe. |
+| **`subdomain_recurse`** | discovered subdomains (`passive_subdomains`) | Re-queries a fast subset of the passive sources (`crtsh`, `certspotter`, `anubis`, `otx`) against each discovered subdomain as a *deeper* seed (`dev.acme.com` → `*.dev.acme.com`) for `recon.recursion.max_rounds` rounds (default 2). Names in the deeper zone no top-level query surfaces. | Third-party only, audited `n/a`. Bounded: 60 seeds/round, 3000 new names total. Only recurses on real subdomains, never apexes. |
+| **`subdomain_permute`** | discovered subdomains + `dns` | Generates dnsgen/altdns-style variants of known names (`api` → `api-dev`, `dev-api`, `api2`, `dev.api`, region/number suffixes) and resolves each. Finds names in no dataset and no wordlist. Emits `subdomain` + an `alias_of` edge to the origin. | Wildcard-DNS filtered via the shared helper — a candidate that resolves *only* to the apex's wildcard target is dropped. `recon.permutation.wordlist` / `.max_candidates` (default 5000) tune it. |
 | **`internetdb`** | resolved IPs (from `dns`) | Shodan **InternetDB** (`internetdb.shodan.io`, **keyless, no account**): one GET per in-scope resolved IPv4 → open ports + CPEs (`service` evidence), PTR hostnames (`subdomain`/`domain`), and Shodan's precomputed **known-CVE list** (`cve` findings, `notable`). **Zero packets to the target** — a lookup against Shodan's dataset, audited `n/a`. | Passive phase (needs `dns`'s resolved IPs; OSINT runs too early). IPv4 only; 404 = "Shodan has nothing", not an error. Feeds `cve_correlate` (Wave 2). |
 | **`probe_http`** | known hosts (from `dns` / CT / passive sources) | Liveness bridge: probes `https://` then `http://` on every discovered host, follows the audited redirect chain, records final status + page `<title>` + `Server` + scheme → `url` + `service` + `tech` + `redirect` evidence. This is the input filter the crawler / js_analyzer / screenshot / active phase all work from. | `https` answering ends the probe for that host (no redundant `http` hit). Connection refusals are silent; only timeouts get an error row. Distinct from `http_analyzer` (which digs into header/TLS posture). |
 | **`http_analyzer`** | hosts (from scope + discovered subdomains) | Probes HTTP+HTTPS: redirect chains, response + security headers (present *and* absent → negative findings), disclosing headers, cookies + flags, TLS cert, tech fingerprint. | Depends on `dns` + `ct_subdomains`. Missing security headers show up in the report's "Missing controls" section. |
