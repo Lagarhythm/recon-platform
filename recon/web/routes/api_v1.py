@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
 from recon.cli.client import InProcessClient
-from recon.cli.output import EXIT_AUTH, EXIT_MODULE_FAILURES, EXIT_SCAN_FAILED, CliError
+from recon.cli.output import EXIT_AUTH, CliError
 from recon.db import session_scope
 from recon.models.user import User
 from recon.orchestrator.tokens import TokenService
@@ -50,7 +50,11 @@ def _client(user: User) -> InProcessClient:
 
 
 def _http_status(code: int) -> int:
-    return {EXIT_AUTH: 403, EXIT_SCAN_FAILED: 502, EXIT_MODULE_FAILURES: 200}.get(code, 400)
+    # Client errors from the shared InProcessClient are either an auth problem
+    # (403) or a bad request (400). Scan outcome codes (2 "module failures",
+    # 4 "scan failed") are never *raised* - they ride in the status payload the
+    # CLI reads to compute its own exit code, on both transports.
+    return 403 if code == EXIT_AUTH else 400
 
 
 async def _call(coro) -> Any:  # noqa: ANN001
