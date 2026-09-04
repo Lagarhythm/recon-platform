@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from recon.core.audit import audit_logger
 from recon.core.roe import RoEConfig
 from recon.core.scope import ScopeManager
+from recon.models.artifact import Artifact
 from recon.models.engagement import Engagement
 from recon.models.enums import FindingPolarity, ModulePhase, ScopeStatus
 from recon.models.evidence import Evidence
@@ -184,6 +185,31 @@ class ModuleContext:
             self._session.add(ev)
             self._module_run.error_count += 1
             await self._tick()
+
+    async def add_artifact(
+        self,
+        *,
+        data: bytes,
+        kind: str,
+        content_type: str | None = None,
+        asset_id: str | None = None,
+    ) -> Artifact:
+        """Write a large captured blob (clone log, raw output) to the content-
+        addressed artifact store and register its manifest row. Keeps bulky raw
+        data out of ``Evidence.raw_data`` (PRD Section 9)."""
+        from recon.artifacts.store import ArtifactStore
+
+        artifact = ArtifactStore().store_bytes(
+            self.engagement.id,
+            data,
+            kind=kind,
+            content_type=content_type,
+            asset_id=asset_id,
+        )
+        async with self._lock:
+            self._session.add(artifact)
+            await self._tick()
+        return artifact
 
     # --- reading prior findings (module chaining) ----------------------
     async def known_values(self, *subject_types: str) -> list[str]:

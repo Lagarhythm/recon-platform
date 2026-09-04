@@ -48,6 +48,9 @@ await ctx.add_evidence(
 )
 await ctx.add_negative(subject_type=..., subject_value=..., summary=..., raw_data=None)
 await ctx.add_error(subject_value=..., summary=..., raw_data=None)
+await ctx.add_artifact(data=bytes, kind=str, content_type=None, asset_id=None)
+    # large captured blobs (clone logs, raw outputs) -> content-addressed
+    # Artifact row, keeping Evidence.raw_data lean (PRD Section 9)
 
 vals = await ctx.known_values("subdomain", "domain")   # distinct prior subject values
 evs  = await ctx.known_evidence("js_file")             # prior Evidence rows

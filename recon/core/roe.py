@@ -272,6 +272,9 @@ class GitSecretsPolicy(BaseModel):
     clone_depth: CloneDepth = CloneDepth.FULL
     # Decision B (PRD Section 13a): trufflehog live verification, opt-in, default off.
     verify: bool = False
+    # PRD Section 9: per-repo on-disk size cap (default 500 MB) - a repo whose
+    # clone exceeds this is skipped and logged, never scanned.
+    max_repo_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
 
 
 class CVEPolicy(BaseModel):
