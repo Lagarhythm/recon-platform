@@ -22,7 +22,7 @@ from recon.models.evidence import Evidence
 from recon.models.audit import AuditLogEntry
 from recon.models.analysis import Analysis
 from recon.models.artifact import Artifact
-from recon.models.snapshot import AssetSnapshot
+from recon.models.snapshot import AssetSnapshot, ScanDelta
 
 __all__ = [
     "Base",
@@ -39,6 +39,7 @@ __all__ = [
     "Analysis",
     "Artifact",
     "AssetSnapshot",
+    "ScanDelta",
     "AssetType",
     "EngagementStatus",
     "FindingPolarity",

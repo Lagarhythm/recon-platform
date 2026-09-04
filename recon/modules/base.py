@@ -245,6 +245,81 @@ class ModuleContext:
         async with self._lock:
             return list((await self._session.execute(stmt)).scalars().all())
 
+    async def known_asset_rows(
+        self, *asset_types: str, in_scope_only: bool = True
+    ) -> list[Any]:
+        """Full correlated Asset rows (not just ``.value``) for the given
+        types - lets a module read ``interest_level``/``confidence_score``
+        alongside the value, e.g. ``scan_diff`` inheriting a finding's
+        interest onto the delta it emits for that finding."""
+        from recon.models.asset import Asset
+        from recon.models.enums import AssetType, ScopeStatus
+
+        types = [AssetType(t) for t in asset_types]
+        stmt = select(Asset).where(
+            Asset.engagement_id == self.engagement.id, Asset.type.in_(types)
+        )
+        if in_scope_only:
+            stmt = stmt.where(Asset.in_scope_status == ScopeStatus.IN_SCOPE)
+        async with self._lock:
+            return list((await self._session.execute(stmt)).scalars().all())
+
+    # --- scan_diff's snapshot/delta persistence --------------------------
+    # AssetSnapshot/ScanDelta are scan_diff's own data model (PRD S11.10) - no
+    # other module writes them, so these three methods are its sanctioned
+    # side-effect channel, the same role add_evidence plays for everything else.
+    async def latest_asset_snapshot(self) -> Any | None:
+        """The most recent AssetSnapshot for this engagement (across every
+        scan run), or ``None`` on a first run - the diff baseline."""
+        from recon.models.snapshot import AssetSnapshot
+
+        stmt = (
+            select(AssetSnapshot)
+            .where(AssetSnapshot.engagement_id == self.engagement.id)
+            .order_by(AssetSnapshot.taken_at.desc())
+            .limit(1)
+        )
+        async with self._lock:
+            return (await self._session.execute(stmt)).scalars().first()
+
+    async def write_asset_snapshot(
+        self, *, signature_set: list[str], summary: dict[str, int]
+    ) -> Any:
+        from recon.models.snapshot import AssetSnapshot
+
+        snap = AssetSnapshot(
+            engagement_id=self.engagement.id,
+            scan_run_id=self.scan_run_id,
+            signature_set=signature_set,
+            summary=summary,
+        )
+        async with self._lock:
+            self._session.add(snap)
+            await self._tick()
+        return snap
+
+    async def write_scan_delta(
+        self,
+        *,
+        base_snapshot_id: str | None,
+        added: list[str],
+        removed: list[str],
+        changed: list[dict[str, str]],
+    ) -> None:
+        from recon.models.snapshot import ScanDelta
+
+        delta = ScanDelta(
+            engagement_id=self.engagement.id,
+            scan_run_id=self.scan_run_id,
+            base_snapshot_id=base_snapshot_id,
+            added=added,
+            removed=removed,
+            changed=changed,
+        )
+        async with self._lock:
+            self._session.add(delta)
+            await self._tick()
+
     # --- audit for non-HTTP outbound actions --------------------------
     async def audit_action(
         self,
