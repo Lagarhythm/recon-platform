@@ -89,6 +89,9 @@ class RelationshipType(str, enum.Enum):
     #: a dangling subdomain is a takeover candidate for the third-party provider
     #: its CNAME points at (PRD §11.5)
     TAKEOVER_CANDIDATE = "takeover_candidate"
+    #: a CVE finding affects the service/url asset whose version matched it
+    #: (PRD §11.9)
+    AFFECTS = "affects"
     # OSINT
     OWNS = "owns"
     EMPLOYED_BY = "employed_by"
