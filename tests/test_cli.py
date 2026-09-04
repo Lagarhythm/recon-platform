@@ -308,11 +308,12 @@ async def test_diff_since_unknown_run_errors(engagement_id):
         await InProcessClient().diff(engagement_id, "no-such-run")
 
 
-async def test_cve_is_wave2(engagement_id):
-    c = InProcessClient()
-    assert (await c.cve_status())["available"] is False
-    with pytest.raises(CliError):
-        await c.cve_refresh(None)
+async def test_cve_status_before_any_refresh_is_unavailable(engagement_id):
+    # cve_refresh itself hits CISA/NVD over the network - covered with the
+    # index mocked in tests/test_cve_index.py, not here.
+    status = await InProcessClient().cve_status()
+    assert status["available"] is False
+    assert status["kev_count"] == 0
 
 
 # ---------------------------------------------------------------------------
