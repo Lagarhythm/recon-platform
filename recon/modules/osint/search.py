@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from recon.models.enums import ModulePhase
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.osint._common import interesting_path, org_targets
-from recon.modules.osint._search import run_query, search_backend
+from recon.modules.osint._search import run_query, search_backend, verify_operators_honoured
 from recon.modules.registry import register
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -71,6 +71,29 @@ _DORKS: list[tuple[str, bool, str]] = [
 _HIGH_INTEREST = {"config", "creds", "paste", "cloud"}
 _NOTABLE = {"exposure", "panels", "files", "collab"}
 
+# paste/cloud dorks are only trusted off-domain when the hit actually lands on
+# one of these known paste/cloud hosts - anything else is an unrelated indexed
+# page that happened to match a loose keyword search.
+_PASTE_HOSTS = {"pastebin.com", "gist.github.com", "paste.ee",
+                "justpaste.it", "controlc.com", "rentry.co"}
+_CLOUD_HOSTS = {"s3.amazonaws.com", "storage.googleapis.com", "blob.core.windows.net"}
+_ALLOWLIST_HOSTS = _PASTE_HOSTS | _CLOUD_HOSTS
+
+
+def _host_in(host: str, allowlist: set[str]) -> bool:
+    return any(host == h or host.endswith("." + h) for h in allowlist)
+
+
+def _string_present(text: str, needle: str) -> bool:
+    """Loose substring match tolerant of engines dropping punctuation/spacing."""
+    if not needle:
+        return False
+    blob = text.lower()
+    if needle.lower() in blob:
+        return True
+    compact_needle = re.sub(r"\W+", "", needle.lower())
+    return bool(compact_needle) and compact_needle in re.sub(r"\W+", "", blob)
+
 
 @register
 class SearchDorkModule(ReconModule):
@@ -95,6 +118,16 @@ class SearchDorkModule(ReconModule):
             return
         co = f'"{company}"' if company else ""
 
+        operators_honoured = await verify_operators_honoured(
+            ctx, domains[0] if domains else "", backend=backend
+        )
+        if operators_honoured is False:
+            await ctx.progress(
+                f"search ({backend}): site: probe returned off-domain hosts - "
+                "this backend does not appear to honour search operators; "
+                "every hit will still be host-verified before being trusted"
+            )
+
         queries: list[tuple[str, str]] = []
         for cat, needs_co, tmpl in _DORKS:
             if needs_co and not company:
@@ -114,7 +147,7 @@ class SearchDorkModule(ReconModule):
             ctx.check_alive()
             if emitted >= _MAX_EMIT:
                 break
-            for res in await run_query(ctx, q, limit=_PER_QUERY):
+            for res in await run_query(ctx, q, backend=backend, limit=_PER_QUERY):
                 emitted += await self._handle(ctx, cat, q, res, domains, seen, company)
             await ctx.progress(
                 f"search: {i}/{len(queries)} dorks, {emitted} finding(s)",
@@ -132,6 +165,7 @@ class SearchDorkModule(ReconModule):
         if _DORK_ECHO.search(res.title or ""):     # SEO spam echoing the query
             return 0
         host = (urlsplit(res.url).hostname or "").lower().strip(".")
+        blob = f"{res.title} {res.snippet}"
         interest = ("high_value" if cat in _HIGH_INTEREST
                     else "notable" if cat in _NOTABLE else "informational")
         raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
@@ -141,23 +175,62 @@ class SearchDorkModule(ReconModule):
         # company-name dorks (people / social / cloud / collab) are noisy - the
         # engine ignores quotes and returns anything sharing a word. Keep a hit
         # only if the company name actually appears in the title/snippet.
-        if cat in ("people", "social", "cloud", "collab") and company:
-            blob = f"{res.title} {res.snippet}".lower()
-            compact = re.sub(r"\W+", "", company.lower())
-            if company.lower() not in blob and compact not in re.sub(r"\W+", "", blob):
-                return 0
+        if cat in ("people", "social", "cloud", "collab") and company and not _string_present(
+            blob, company
+        ):
+            return 0
 
-        # emails in the snippet - confirmed public data
+        # "code" dorks quote the domain, not the company - same noise problem,
+        # same fix: require the domain string to actually appear in the hit.
+        if cat == "code" and domains and not any(_string_present(blob, d) for d in domains):
+            return 0
+
+        on_target = any(host == d or host.endswith("." + d) for d in domains)
+
+        # paste dorks quote a domain, cloud dorks quote the company - verify
+        # against whichever string that category's template actually used.
+        if cat == "paste":
+            allowlisted_off_domain = _host_in(host, _PASTE_HOSTS) and any(
+                _string_present(blob, d) for d in domains
+            )
+        elif cat == "cloud":
+            allowlisted_off_domain = _host_in(host, _CLOUD_HOSTS) and _string_present(
+                blob, company
+            )
+        else:
+            allowlisted_off_domain = False
+
+        # Any hit that isn't genuinely on-target (or a verified paste/cloud
+        # host carrying the target string, or a people/social/collab/code hit
+        # that already passed its own company-/domain-string check above) is
+        # unverifiable noise from the search backend ignoring its
+        # site:/filetype: operators - record it as evidence-only, never
+        # promote it to a target asset.
+        target_linked = on_target or allowlisted_off_domain or cat in (
+            "people", "social", "collab", "code",
+        )
+        if not target_linked:
+            await ctx.add_evidence(
+                subject_type="unverified_search_hit", subject_value=res.url,
+                raw_data={"source": f"dork/{cat}", "query": query, "host": host,
+                          "title": res.title, "snippet": res.snippet[:400],
+                          "engine": res.engine},
+                summary=f"unverified search hit ({cat}): {res.url} - host not linked to target",
+            )
+            return n + 1
+
+        # emails in the snippet - confirmed public data. Compare the email's
+        # domain label, not a raw string suffix: "contact@notexample.com"
+        # must not match target domain "example.com".
         for em in set(_EMAIL_RE.findall(res.snippet)):
-            if any(em.lower().endswith(d) for d in domains):
+            emdom = em.lower().rsplit("@", 1)[-1]
+            if any(emdom == d or emdom.endswith("." + d) for d in domains):
                 await ctx.add_evidence(
                     subject_type="email", subject_value=em.lower(),
                     raw_data={"source": f"dork/{cat}", "seen_on": res.url},
                     summary=f"{em} - in a search result snippet ({res.url})",
                 )
                 n += 1
-
-        on_target = any(host == d or host.endswith("." + d) for d in domains)
 
         if (cat == "subdomains" and on_target and host
                 and host not in domains and not host.startswith("www.")):
@@ -205,8 +278,10 @@ class SearchDorkModule(ReconModule):
         if cat in ("files", "config"):
             return n
 
-        # panels / exposure / creds / anything else on-target -> url finding
-        if on_target or cat in ("creds", "panels", "exposure"):
+        # panels / exposure / creds / anything else on-target -> url finding.
+        # (already known target_linked at this point; on_target is the only
+        # way a non-exempt, non-paste/cloud category could have gotten here.)
+        if on_target:
             await ctx.add_evidence(
                 subject_type="url", subject_value=res.url, raw_data=raw,
                 summary=f"[{cat}] {res.title or res.url}",

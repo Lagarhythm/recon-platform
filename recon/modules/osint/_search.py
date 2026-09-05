@@ -23,7 +23,7 @@ audited, rate-limited and jittered like any other OSINT call.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 from recon.config import get_settings
 from recon.modules.base import ModuleContext
@@ -59,8 +59,15 @@ def _cse_configured() -> bool:
     return bool(s.google_cse_key.strip() and s.google_cse_id.strip())
 
 
-async def run_query(ctx: ModuleContext, query: str, *, limit: int = 10) -> list[SearchResult]:
-    backend = search_backend()
+async def run_query(
+    ctx: ModuleContext, query: str, *, backend: str | None = None, limit: int = 10
+) -> list[SearchResult]:
+    """Run one dork query. ``backend`` should be the value the caller already
+    resolved from :func:`search_backend` at the start of its run - passed
+    explicitly rather than re-resolved here, so a caller (or a test) that
+    pins the backend via one reference sees it honoured on every query."""
+    if backend is None:
+        backend = search_backend()
     if backend == "searxng":
         results = await _searxng(ctx, query, limit)
         # SearXNG's scraped engines get throttled - fall back to CSE on an empty
@@ -113,3 +120,32 @@ async def _google_cse(ctx: ModuleContext, query: str, limit: int) -> list[Search
             snippet=str(r.get("snippet") or ""), engine="google_cse",
         ))
     return out
+
+
+async def verify_operators_honoured(
+    ctx: ModuleContext, domain: str, *, backend: str
+) -> bool | None:
+    """Probe whether the backend actually applies ``site:`` filtering.
+
+    Issues ``site:<domain>`` and checks that every returned host is on that
+    domain. Returns ``False`` if any result clearly isn't (the scraped
+    engines are ignoring the operator - the failure mode behind the
+    "Christopher Earl" run), ``True`` if the probe came back clean, or
+    ``None`` if it's inconclusive (empty result - a throttled engine or an
+    unusually narrow domain, not evidence either way).
+
+    Only meaningful for ``searxng``: the scraped engines behind it can silently
+    stop honouring operators; Google CSE's own index applies them server-side.
+    This is a diagnostic signal only - the dork module's target-linkage gate
+    already host-verifies every result regardless of what this returns.
+    """
+    if backend != "searxng" or not domain:
+        return None
+    results = await _searxng(ctx, f"site:{domain}", 10)
+    if not results:
+        return None
+    for r in results:
+        host = (urlsplit(r.url).hostname or "").lower().strip(".")
+        if host != domain and not host.endswith("." + domain):
+            return False
+    return True

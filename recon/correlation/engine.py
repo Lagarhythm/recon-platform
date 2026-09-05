@@ -80,6 +80,13 @@ _ATTRIBUTE_TYPES = {
     "tls_rpt",
 }
 
+# subject_types that are audit-trail evidence only - a source recorded a hit it
+# could not validate as target-linked. Never promoted to a Finding/Asset and
+# never a relationship-hint source (see search.py's off-target search results).
+_EVIDENCE_ONLY_TYPES = {
+    "unverified_search_hit",
+}
+
 import re as _re
 
 # Bump an asset to NOTABLE when one of these appears as a *token* in its value
@@ -300,6 +307,14 @@ class CorrelationEngine:
     # --- evidence routing -----------------------------------------
     def _route_evidence(self, ev, groups, attributes, rel_hints, summary) -> None:  # noqa: ANN001
         st = ev.subject_type
+
+        # Evidence-only subject types: audit trail, never a Finding/Asset and
+        # never a relationship hint source. Must return before the generic
+        # "unknown subject_type -> FINDING" fallthrough below, which is what
+        # would otherwise materialise it and let _interest bump it to NOTABLE.
+        if st in _EVIDENCE_ONLY_TYPES:
+            return
+
         # explicit relationship hints travel in raw_data
         for hint in (ev.raw_data or {}).get("relationships", []) or []:
             try:

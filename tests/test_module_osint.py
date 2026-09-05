@@ -248,6 +248,11 @@ async def test_search_noops_without_a_backend(engagement_id, monkeypatch):
 @pytest.mark.asyncio
 async def test_search_dorks_produce_documents_people_subdomains(engagement_id, monkeypatch):
     monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: "searxng")
+    # _searxng() builds its URL from get_settings().searxng_url, independent of
+    # the search_backend() patch above - needs a real value or every request
+    # is a malformed relative URL that never reaches the fake route.
+    monkeypatch.setenv("RECON_SEARXNG_URL", "http://127.0.0.1:8888")
+    get_settings.cache_clear()
 
     def route(method, url):
         if "filetype%3Apdf" in url or "filetype:pdf" in url:
@@ -272,6 +277,7 @@ async def test_search_dorks_produce_documents_people_subdomains(engagement_id, m
         ctx.roe.osint.company = "Acme Corp"
         ctx.roe.osint.seed_domains = ["example.com"]
         await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
 
     docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
     assert "https://example.com/reports/q3.pdf" in docs
@@ -306,3 +312,150 @@ async def test_search_falls_back_to_google_cse_when_searxng_empty(engagement_id,
 
     docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
     assert "https://example.com/leak.sql" in docs   # came from the CSE fallback
+
+
+def _search_ctx(engagement_id, monkeypatch, routes):
+    monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: "searxng")
+    monkeypatch.setenv("RECON_SEARXNG_URL", "http://127.0.0.1:8888")
+    get_settings.cache_clear()
+    return module_harness(engagement_id, "search", http=FakeHTTP(routes))
+
+
+@pytest.mark.asyncio
+async def test_search_gates_off_target_hits_to_unverified_evidence(engagement_id, monkeypatch):
+    """The 'Christopher Earl' failure mode: a backend that ignores site:/
+    filetype: operators and returns unrelated hosts for every dork category
+    (creds/panels/exposure via the on_target-or-category bypass, paste/cloud
+    via the no-check-at-all path). None of it should become a url/document
+    asset - all of it should land as low-confidence 'unverified_search_hit'
+    evidence instead."""
+    off_target = [
+        {"url": "https://bls.gov/report.pdf", "title": "BLS report",
+         "content": "labor stats", "engine": "bing"},   # would-be creds/panels/exposure hit
+    ]
+
+    def route(method, url):
+        return _searx(off_target)
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="document") == []
+    assert await evidence_for(engagement_id, subject_type="url") == []
+    unverified = await evidence_for(engagement_id, subject_type="unverified_search_hit")
+    assert any(e.subject_value == "https://bls.gov/report.pdf" for e in unverified)
+
+
+@pytest.mark.asyncio
+async def test_search_paste_cloud_require_allowlisted_host(engagement_id, monkeypatch):
+    """A 'paste' dork hit on a host that isn't a known paste site (the search
+    engine ignored site:pastebin.com etc.) must not become a document asset
+    even though the domain string happens to appear in the snippet."""
+    def route(method, url):
+        if "pastebin.com" in url or "gist.github.com" in url:
+            return _searx([
+                {"url": "https://not-a-paste-site.example.net/x", "title": "example.com leak",
+                 "content": "example.com credentials", "engine": "bing"},
+                {"url": "https://pastebin.com/abc123", "title": "example.com dump",
+                 "content": "example.com passwords", "engine": "bing"},
+            ])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
+    assert docs == {"https://pastebin.com/abc123"}
+    unverified = {e.subject_value for e in
+                  await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    assert "https://not-a-paste-site.example.net/x" in unverified
+
+
+@pytest.mark.asyncio
+async def test_search_email_domain_boundary_not_suffix_match(engagement_id, monkeypatch):
+    """contact@notexample.com must not be captured as an email belonging to
+    target domain example.com just because the string ends with it."""
+    def route(method, url):
+        if "-inurl%3Awww" in url or "-inurl:www" in url:
+            return _searx([{"url": "https://example.com/contact", "title": "Contact",
+                            "content": "reach us at contact@notexample.com or "
+                                       "ops@example.com", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    emails = {e.subject_value for e in await evidence_for(engagement_id, subject_type="email")}
+    assert emails == {"ops@example.com"}
+    assert "contact@notexample.com" not in emails
+
+
+@pytest.mark.asyncio
+async def test_search_code_dork_requires_domain_string_in_hit(engagement_id, monkeypatch):
+    """'code' dorks quote the domain, not the company - an unrelated GitHub
+    result that doesn't actually mention the domain must not become a social
+    asset just because the host is github.com."""
+    def route(method, url):
+        if "github.com" in url:
+            return _searx([
+                {"url": "https://github.com/someorg/unrelated-repo",
+                 "title": "unrelated-repo", "content": "nothing to do with us", "engine": "bing"},
+                {"url": "https://github.com/example-com/infra",
+                 "title": "infra - example.com tooling", "content": "example.com internal tools",
+                 "engine": "bing"},
+            ])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    social = {e.subject_value for e in await evidence_for(engagement_id, subject_type="social")}
+    assert social == {"https://github.com/example-com/infra"}
+
+
+# --------------------------------------------------------------------------- #
+# domain-boundary regressions (suffix-match vs. label-match)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_wayback_domain_boundary_not_suffix_match(engagement_id):
+    """host.endswith(domain) (no dot) would wrongly match notexample.com for
+    target domain example.com - must require a real label boundary."""
+    cdx = [
+        ["original", "timestamp", "statuscode", "mimetype"],
+        ["http://notexample.com/", "20180101000000", "200", "text/html"],
+        ["http://sub.example.com/", "20180101000000", "200", "text/html"],
+    ]
+    routes = {"web.archive.org/cdx/search/cdx": _json(cdx)}
+    await _run(engagement_id, "wayback", WaybackModule, routes, seed_domains=["example.com"])
+
+    subs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="subdomain")}
+    assert "sub.example.com" in subs
+    assert "notexample.com" not in subs
+    assert await evidence_for(engagement_id, subject_type="url") == []
+    assert await evidence_for(engagement_id, subject_type="document") == []
+
+
+@pytest.mark.asyncio
+async def test_ct_org_domain_boundary_not_suffix_match(engagement_id):
+    """name.endswith(domain) (no dot) would wrongly match evilexample.com for
+    target domain example.com - must require a real label boundary."""
+    routes = {
+        "q=%25.example.com": _json([
+            {"name_value": "evilexample.com\nsub.example.com",
+             "issuer_name": "C=US, O=Let's Encrypt, CN=R3",
+             "subject_name": "CN=example.com"},
+        ]),
+    }
+    await _run(engagement_id, "ct_org", CTOrgModule, routes, seed_domains=["example.com"])
+
+    subs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="subdomain")}
+    assert "sub.example.com" in subs
+    assert "evilexample.com" not in subs
