@@ -91,6 +91,14 @@ _PLACEHOLDER_HINTS = (
     "dummy", "sample", "redacted", "process.env", "import.meta", "${", "<%", "{{",
 )
 
+_FIXTURE_PATH = re.compile(
+    r"(?:^|/)(?:tests?|testdata|fixtures|__tests__)(?:/|$)|"
+    r"(?:^|/)[^/]+_test\.[^/]+$|(?:^|/)[^/]+\.spec\.[^/]+$|"
+    r"(?:^|/)conftest\.py$",
+    re.IGNORECASE,
+)
+_SELF_REPOS = {"lagarhythm/recon-platform"}
+
 
 def _mask(secret: str) -> str:
     if len(secret) <= 8:
@@ -153,9 +161,15 @@ def _tail(data: bytes, limit: int = 2000) -> str:
     return text[-limit:] if len(text) > limit else text
 
 
+def _is_fixture_path(path: str) -> bool:
+    return bool(_FIXTURE_PATH.search(path.replace("\\", "/")))
+
+
 def _scan_text(text: str, repo: str, commit: str, path: str) -> list[dict]:
     """Run the ruleset over one blob's decoded text. Returns findings with the
     match already redacted - the raw secret never leaves this function."""
+    if _is_fixture_path(path):
+        return []
     findings: list[dict] = []
     seen: set[str] = set()
 
@@ -369,7 +383,7 @@ class GitSecretsModule(ReconModule):
         seen: set[str] = set()
         for ev in await ctx.known_evidence("repository"):
             name = _repo_full_name(ev)
-            if not name or name in seen:
+            if not name or name.lower() in _SELF_REPOS or name in seen:
                 continue
             seen.add(name)
             repos.append({"name": name})
