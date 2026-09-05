@@ -90,7 +90,7 @@ class WaybackModule(ReconModule):
                 continue
             parts = urlsplit(original)
             host = (parts.hostname or "").lower().strip(".")
-            if not host or not host.endswith(domain):
+            if not host or not (host == domain or host.endswith("." + domain)):
                 continue
             if _NOISE.search(parts.path):
                 continue

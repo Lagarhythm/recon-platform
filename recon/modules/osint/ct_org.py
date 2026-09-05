@@ -57,7 +57,7 @@ class CTOrgModule(ReconModule):
                 for org in cert_orgs(entry):
                     await self._emit_org(ctx, org, seen_orgs, via=domain, source="crt.sh cert")
                 for name in _iter_names(str(entry.get("name_value", ""))):
-                    if name in seen_names or not name.endswith(domain):
+                    if name in seen_names or not (name == domain or name.endswith("." + domain)):
                         continue
                     seen_names.add(name)
                     stype = "subdomain" if name != domain and name.count(".") >= 2 else "domain"

@@ -329,7 +329,7 @@ All calls are audited as `n/a` scope and rate-limited.
 | **`github_org`** | `github_org` slug (strongly preferred), or company + seed_domains | Resolves the GitHub account (User *or* Org), enumerates public repos (language, topics, activity, homepage) → `repository` + one org-level `tech_stack` finding. For a real Org, also public members → `person` + `employed_by`. | **Pin `osint.github_org`.** Name search is unreliable: GitHub's relevance ranking often doesn't surface the right account, and a common company name collides with unrelated look-alike orgs. A name-only match is *rejected* whenever seed_domains are set and none corroborate (blog host / email / bio must reference a seed domain). Set `RECON_OSINT_GITHUB_TOKEN` to raise the API limit 60→5000/hr. |
 | **`git_secrets`** | `repository` assets from `github_org` | Clones each discovered public repo (shell `git`, into a temp dir under `data/artifacts/`) and walks **every blob in every commit** — catching credentials that were committed and later deleted or amended, which `js_analyzer`'s crawl can never see. Vendored detect-secrets-style ruleset (AWS/GCP/Azure keys, JWTs, private keys, Slack/GitHub/GitLab/Stripe tokens, generic high-entropy `KEY=value`). Emits `secret` findings at `high_value`; the match is **redacted before it becomes evidence** — no raw secret is ever stored. Findings are **unverified by default**; `recon.git_secrets.verify: true` opts into `trufflehog` live verification (third-party provider probes only). | Per-repo clone failure is non-fatal (skip + continue). Honors `recon.git_secrets.clone_depth` (full|shallow) and a per-repo size cap (`max_repo_bytes`, default 500 MB — skip + log beyond it). `check_alive()` is honored between commits, so a large history walk can be killed mid-run. **Guardrail:** secrets are flagged only — never used to authenticate. |
 | **`wayback`** | seed_domains | Internet Archive CDX API: every historical URL under each domain. Emits `subdomain` (hosts no longer live), `document` (archived files/dumps), `url` (paths matching an interest pattern: admin, api, backup, .git, …). | Skips framework build noise (`/_next/`, `/static/chunks/`) and standard web plumbing (robots.txt, sitemap.xml, feeds, `.well-known/*`). Caps at 2000 emitted rows. 10-min cap. |
-| **`search`** | a search backend configured (see §7) + company/seed_domains | Runs ~14 dork templates through SearXNG or Google CSE: `filetype:` file discovery, `intitle:"index of"`, login/admin panels, `-inurl:www` subdomains, secret-keyword pages, code/paste-site/cloud-storage mentions, LinkedIn staff, social profiles. | No-ops silently if no backend. Company-name dorks (people/social/cloud) require the company string in the result to cut LinkedIn noise. `files`/`config` hits only become `document` assets if the URL actually resolves to a file. Confirmed emails from result snippets only — never guessed addresses. |
+| **`search`** | a search backend configured (see §7) + company/seed_domains | Runs ~14 dork templates through SearXNG or Google CSE: `filetype:` file discovery, `intitle:"index of"`, login/admin panels, `-inurl:www` subdomains, secret-keyword pages, code/paste-site/cloud-storage mentions, LinkedIn staff, social profiles. | No-ops silently if no backend. Every result is target-linkage gated before it can become an asset: on-domain host, or (for paste/cloud dorks) an allowlisted paste/cloud host that actually carries the target string. A hit that fails the gate never becomes a `url`/`document`/`social` asset — it's recorded as `unverified_search_hit` evidence only (the Correlation Engine deliberately never materialises that subject type). Company-name dorks (people/social/cloud) and `code` require the company/domain string in the result, not just the dork category, to cut noise. `files`/`config` hits only become `document` assets if the URL is on-domain *and* actually resolves to a file. Confirmed emails from result snippets are domain-boundary matched (`user@notexample.com` does not count for `example.com`) — never guessed addresses. Runs a one-shot `site:` self-test against SearXNG at module start and logs a warning if the backend appears to ignore operators (see §7) — informational only, the gate above is unconditional either way. |
 | **`passive_urls`** | in-scope / seed domains (feeds off `passive_subdomains`'s domain set) | "gau in Python": every URL anyone's seen for the domain from keyless archives/indexes — Wayback CDX, Common Crawl NDJSON index, AlienVault OTX `url_list`, urlscan `search?q=domain:`. Feeds `js_analyzer` and seeds `dir_fuzz`. | Deduped against whatever `probe_http` already confirmed live. Per-source errors non-fatal. |
 | **`cloud_assets`** | company name and/or seed_domains | Generates bounded candidate names (company/domain + common suffixes: `-backups`, `-data`, `-prod`, …) and checks S3/GCS/Azure's public listing endpoints, capped at one metadata entry per request. A 200 (listable) is `high_value`; a 401/403 (exists, not listable) is `notable`. | **Never downloads object contents** — index/metadata only, by design (this is the hard line, not a style choice). Per-candidate errors non-fatal; candidate count capped. |
 
@@ -494,6 +494,28 @@ curl -s 'http://127.0.0.1:8888/search?q=site:github.com+fastapi&format=json' \
 Expect ~15–20 results via `['bing', 'qwant']`. `results: []` with
 `unresponsive_engines` full of "CAPTCHA" / "too many requests" means the engines
 are throttled — wait it out, or add another tolerant engine.
+
+### Operator support can silently regress
+
+The config above was verified 2026-09-03 against Bing/Qwant, but a scraped
+engine can start ignoring `site:`/`filetype:` at any time without SearXNG
+telling you — that's what actually happened to the "Christopher Earl" scan:
+`site:sinewbyte.com` came back with unrelated hosts (government sites, a
+careers-aggregator page, an Xbox status page) mixed in with real hits.
+
+Two independent defenses now cover this, so a regression in engine behaviour
+never reaches the asset graph:
+
+1. **Target-linkage gate (always on).** The `search` module verifies the
+   *result host* itself against the target's domains before trusting a hit,
+   regardless of whether the backend's `site:` filter actually worked. A hit
+   that fails is recorded as low-confidence `unverified_search_hit` evidence,
+   never promoted to a `url`/`document` asset.
+2. **One-shot self-test (diagnostic).** At the start of every run, the module
+   fires a single `site:<domain>` probe and checks the returned hosts. If any
+   are off-domain, it logs a progress warning that the backend isn't honouring
+   operators — worth investigating (a newly-throttled engine, a `settings.yml`
+   drift) even though the gate above means it can't leak into results.
 
 ### Legacy: `google_cse` backend
 
