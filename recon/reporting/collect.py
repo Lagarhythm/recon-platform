@@ -14,7 +14,7 @@ from recon.models.audit import AuditLogEntry
 from recon.models.engagement import Engagement
 from recon.models.enums import AssetType, FindingPolarity, InterestLevel
 from recon.models.evidence import Evidence
-from recon.models.scanrun import ScanRun
+from recon.models.scanrun import ScanModuleRun, ScanRun
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -65,6 +65,14 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
             )
         ).scalars()
     )
+    module_runs = list((await session.execute(select(ScanModuleRun).where(
+        ScanModuleRun.engagement_id == engagement.id))).scalars())
+    modules_by_run: dict[str, list[dict[str, Any]]] = {}
+    for m in module_runs:
+        outcome = "failed" if m.status.value == "failed" else (
+            "partial" if m.error_count else ("completed-empty" if m.status.value == "completed" and not m.evidence_count else m.status.value))
+        modules_by_run.setdefault(m.scan_run_id, []).append({"name": m.module_name, "status": outcome,
+            "error_count": m.error_count, "evidence_count": m.evidence_count})
     audit_total = (
         await session.execute(
             select(func.count()).select_from(AuditLogEntry).where(
@@ -147,6 +155,7 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
             "scan_runs": len(runs),
             "audit_entries": audit_total,
             "out_of_scope_overrides": override_count,
+            "incomplete_coverage": any(m["status"] in ("failed", "partial") for ms in modules_by_run.values() for m in ms),
         },
         "findings": findings,
         "negative_findings": negative,
@@ -169,6 +178,9 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
                 "modules_completed": r.modules_completed,
                 "started_at": _iso(r.started_at),
                 "completed_at": _iso(r.completed_at),
+                "module_outcomes": modules_by_run.get(r.id, []),
+                "coverage_note": "Incomplete coverage: one or more modules failed or returned partial results."
+                    if any(m["status"] in ("failed", "partial") for m in modules_by_run.get(r.id, [])) else None,
             }
             for r in runs
         ],

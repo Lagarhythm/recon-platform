@@ -333,6 +333,7 @@
 
 {# ============================ SCAN ACTIVITY ============================ #}
 <h2 id="scans">Scan activity</h2>
+{% if summary.incomplete_coverage %}<p class="notice">Incomplete coverage: one or more modules failed or returned partial results; zero findings from those modules are not a clean result.</p>{% endif %}
 <table>
   <colgroup><col style="width:6rem"><col style="width:6rem"><col><col style="width:9rem"></colgroup>
   <thead><tr><th>Run</th><th>Status</th><th>Modules</th><th>Started</th></tr></thead>
@@ -340,6 +341,7 @@
   <tr><td class="mono muted n">{{ s.id[:8] }}</td><td>{{ s.status }}</td>
       <td class="muted">{{ s.modules | join(', ') }}</td>
       <td class="muted n">{{ (s.started_at or '')[:16] }}</td></tr>
+  {% for m in s.module_outcomes or [] %}<tr><td></td><td>{{ m.status }}</td><td class="muted">{{ m.name }} ({{ m.error_count }} errors; {{ m.evidence_count }} evidence)</td><td></td></tr>{% endfor %}
   {% endfor %}
 </table>
 

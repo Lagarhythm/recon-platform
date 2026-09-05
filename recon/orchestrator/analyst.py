@@ -106,13 +106,17 @@ def _compact(redacted: dict) -> dict:
         {
             "value": a["value"],
             "interest": a.get("interest"),
+            "confidence": a.get("confidence"), "scope": a.get("scope"),
+            "attribution": "uncertain" if a.get("scope") != "in_scope" or (a.get("confidence") or 0) < .7 else "confirmed",
+            "sources": [e.get("module") for e in a.get("evidence", []) if e.get("module")],
             "evidence": _evidence_lines(a),
         }
         for a in sorted(redacted.get("findings", []), key=interest_rank)
         if not a["value"].startswith(_NOISE)
     ]
     notable_urls = [
-        a["value"]
+        {"value": a["value"], "interest": a.get("interest"), "confidence": a.get("confidence"),
+         "scope": a.get("scope"), "sources": [e.get("module") for e in a.get("evidence", []) if e.get("module")]}
         for a in sorted(by_type.get("url", []), key=interest_rank)
         if a.get("interest") in ("high_value", "notable")
     ][:_MAX_NOTABLE_URLS]
@@ -125,7 +129,8 @@ def _compact(redacted: dict) -> dict:
         }
 
     def _vals(t: str) -> list[dict]:
-        return [{"value": a["value"], "evidence": _evidence_lines(a)}
+        return [{"value": a["value"], "confidence": a.get("confidence"), "scope": a.get("scope"),
+                 "sources": [e.get("module") for e in a.get("evidence", []) if e.get("module")], "evidence": _evidence_lines(a)}
                 for a in by_type.get(t, [])]
 
     osint = {}
@@ -149,6 +154,7 @@ def _compact(redacted: dict) -> dict:
         "notable_urls": notable_urls,
         "missing_controls": [n["summary"] for n in redacted.get("negative_findings", [])],
         "relationships": redacted.get("relationships", []),
+        "scan_runs": [{"status": r.get("status"), "module_outcomes": r.get("module_outcomes", []), "coverage_note": r.get("coverage_note")} for r in redacted.get("scan_runs", [])],
     }
     if osint:
         out["osint"] = osint
