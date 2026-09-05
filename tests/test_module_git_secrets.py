@@ -101,6 +101,12 @@ def test_scan_text_skips_placeholders_and_low_entropy():
     assert _scan_text(text, "r", "c" * 40, "p") == []
 
 
+def test_scan_text_skips_fixture_paths():
+    text = 'aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
+    assert _scan_text(text, "org/repo", "c" * 40, "tests/fixture.py") == []
+    assert _scan_text(text, "org/repo", "c" * 40, "conftest.py") == []
+
+
 def test_parse_log_oldest_first():
     text = (
         "ae8dcc8da8277a64bc43c87784be23596ceee6a8\n\na.txt\n"
@@ -217,6 +223,12 @@ async def test_no_repos_is_a_noop(engagement_id, tmp_path, monkeypatch):
     async with module_harness(engagement_id, "git_secrets") as ctx:
         await GitSecretsModule().run(ctx)
     assert await evidence_for(engagement_id) == []
+
+
+@pytest.mark.asyncio
+async def test_own_recon_platform_repo_is_not_history_scanned(engagement_id, tmp_path, monkeypatch):
+    await _run_module(engagement_id, "Lagarhythm/recon-platform", tmp_path, monkeypatch)
+    assert await evidence_for(engagement_id, subject_type="secret") == []
 
 
 @pytest.mark.asyncio

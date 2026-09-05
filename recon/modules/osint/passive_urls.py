@@ -64,7 +64,9 @@ class PassiveURLsModule(ReconModule):
             f"https://otx.alienvault.com/api/v1/indicators/domain/{quote(domain)}/url_list?limit=5000&page=1",
             subject=domain, source="AlienVault OTX")
         if isinstance(otx, dict):
-            rows = otx.get("url_list") or otx.get("url_list", {}).get("url_list", [])
+            # OTX returns an empty list when the domain has no indexed URLs.
+            # Do not fall through to ``[].get(...)`` in that normal case.
+            rows = otx.get("url_list")
             if isinstance(rows, list):
                 results.append(("otx", [str(r.get("url")) for r in rows if isinstance(r, dict) and r.get("url")]))
         scan = await fetch_json(ctx,
