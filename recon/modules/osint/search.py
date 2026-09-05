@@ -33,8 +33,19 @@ _MAX_EMIT = 250
 _DORK_ECHO = re.compile(r"\b(site|inurl|intitle|filetype|intext)\s*:", re.IGNORECASE)
 _LINKEDIN_PROFILE = re.compile(r"^(?:[a-z]{2,3}\.)?linkedin\.com$", re.IGNORECASE)
 _FILETYPE_RE = re.compile(r"filetype:([A-Za-z0-9]+)", re.IGNORECASE)
-_CREDS_KEYWORDS = re.compile(r"\b(password|passwd|api[_ -]?key|secret|credential)\b", re.IGNORECASE)
 _CONFIG_EXTS = frozenset({"env", "yml", "conf", "ini", "log", "sql", "bak", "txt"})
+# An actual credential/secret pattern - a key=value/key:value shape, not just
+# the word "password" appearing in ordinary prose (a "reset your password"
+# help page must not read as a leak).
+_CRED_PATTERN = re.compile(
+    r"\b(password|passwd|api[_ -]?key|secret|token|credential)s?\s*[:=]\s*\S+", re.IGNORECASE
+)
+_SENSITIVE_HINT = re.compile(
+    r"\b(leak(?:ed)?|dump(?:ed)?|breach(?:ed)?|confidential|exposed|compromised)\b", re.IGNORECASE
+)
+_HOSTNAME_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
+)
 
 
 def _linkedin_name(res) -> str | None:
@@ -127,14 +138,21 @@ def _company_mentioned(text: str, company: str) -> bool:
 
 
 def _domain_mentioned(text: str, domain: str) -> bool:
-    """Whether `domain` appears in `text` as a real token - "notexample.com"
-    must not count as a mention of "example.com". Deliberately no
-    punctuation-stripped fallback here: stripping the dot would reopen
-    exactly that bug (the compact form of "notexample.com" still contains
-    the compact form of "example.com" as a substring)."""
+    """Whether `domain` appears in `text` as a complete hostname token - not
+    as a substring of a longer one. A regex word-boundary (`\\b`) is not a
+    hostname boundary: a hyphen or another dot is a non-word character, so
+    `\\bexample\\.com\\b` still matches inside "not-example.com" (hyphen before)
+    and "example.com.evil.invalid" (dot after). Instead, extract whole
+    hostname-shaped tokens and require an exact match or a genuine
+    subdomain relationship, the same check used for a real ``Host:``."""
     if not domain:
         return False
-    return bool(re.search(r"\b" + re.escape(domain.lower()) + r"\b", text.lower()))
+    domain = domain.lower()
+    for token in _HOSTNAME_TOKEN_RE.findall(text.lower()):
+        token = token.rstrip(".")
+        if token == domain or token.endswith("." + domain):
+            return True
+    return False
 
 
 def _platform_linked(cat: str, host: str, blob: str, company: str, domains: list[str]) -> bool:
@@ -223,12 +241,16 @@ def _classify_hit(
 def _derive_interest(cat: str, ext: str | None, blob: str) -> str:
     """Interest from the validated result, not the dork that produced it - an
     on-target page that happens to satisfy a "creds" query isn't high_value
-    unless it actually looks like a credential/secret artefact."""
+    unless it actually looks like a credential/secret artefact, and being on
+    a genuine paste/cloud host isn't itself exposure evidence (a public
+    release note or public docs page hosted there is still just notable)."""
     if cat == "config" and ext in _CONFIG_EXTS:
         return "high_value"
     if cat in ("paste", "cloud"):
-        return "high_value"
-    if cat == "creds" and _CREDS_KEYWORDS.search(blob):
+        if _CRED_PATTERN.search(blob) or _SENSITIVE_HINT.search(blob):
+            return "high_value"
+        return "notable"
+    if cat == "creds" and _CRED_PATTERN.search(blob):
         return "high_value"
     if cat in ("exposure", "panels", "files", "collab"):
         return "notable"
@@ -309,26 +331,14 @@ class SearchDorkModule(ReconModule):
         blob = f"{res.title} {res.snippet}"
         n = 0
 
-        # emails in the snippet - confirmed public data by the email's own
-        # domain match, independent of whether the containing page is
-        # target-linked (a legitimate @target-domain email can surface on an
-        # otherwise-unrelated indexed page).
-        for em in set(_EMAIL_RE.findall(res.snippet)):
-            emdom = em.lower().rsplit("@", 1)[-1]
-            if any(emdom == d or emdom.endswith("." + d) for d in domains):
-                await ctx.add_evidence(
-                    subject_type="email", subject_value=em.lower(),
-                    raw_data={"source": f"dork/{cat}", "seen_on": res.url},
-                    summary=f"{em} - in a search result snippet ({res.url})",
-                )
-                n += 1
-
-        # Every derived entity (subdomain/person/social/document/url) shares
-        # this one gate: on-domain host, or a genuinely on-platform host for
-        # an off-domain category that also carries the target string. A hit
+        # Every derived entity - including an extracted email - shares this
+        # one gate: on-domain host, or a genuinely on-platform host for an
+        # off-domain category that also carries the target string. A hit
         # that fails it is unverifiable noise from the backend ignoring its
         # site:/filetype: operators - record it as evidence-only, never
-        # promote it to a target asset.
+        # promote it (or anything scraped from it) to a target asset. An
+        # @target-domain email string is not, on its own, corroboration that
+        # an unrelated/rejected page is genuinely associated with the target.
         on_target = any(host == d or host.endswith("." + d) for d in domains)
         target_linked = on_target or _platform_linked(cat, host, blob, company, domains)
 
@@ -341,6 +351,18 @@ class SearchDorkModule(ReconModule):
                 summary=f"unverified search hit ({cat}): {res.url} - host not linked to target",
             )
             return n + 1
+
+        # emails in the snippet - confirmed public data by the email's own
+        # domain match, now that the containing page has passed the gate.
+        for em in set(_EMAIL_RE.findall(res.snippet)):
+            emdom = em.lower().rsplit("@", 1)[-1]
+            if any(emdom == d or emdom.endswith("." + d) for d in domains):
+                await ctx.add_evidence(
+                    subject_type="email", subject_value=em.lower(),
+                    raw_data={"source": f"dork/{cat}", "seen_on": res.url},
+                    summary=f"{em} - in a search result snippet ({res.url})",
+                )
+                n += 1
 
         # Classify *before* touching `seen`: a URL that this category
         # doesn't actually qualify (wrong filetype, not a real LinkedIn

@@ -475,6 +475,105 @@ async def test_search_domain_lookalike_text_not_target_linked(engagement_id, mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lookalike", ["not-example.com", "example.com.evil.invalid"])
+async def test_search_domain_lookalike_hostname_variants_not_target_linked(
+    engagement_id, monkeypatch, lookalike
+):
+    """A regex \\b word-boundary is not a hostname boundary: a hyphen before
+    (not-example.com) or another domain after (example.com.evil.invalid) are
+    both non-word characters that satisfy \\b without the text actually
+    mentioning the target domain as a complete hostname token."""
+    def route(method, url):
+        if "pastebin.com" in url:
+            return _searx([{"url": "https://pastebin.com/xyz",
+                            "title": f"{lookalike} release notes", "content": "",
+                            "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="document") == []
+    unverified = {e.subject_value for e in
+                  await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    assert "https://pastebin.com/xyz" in unverified
+
+
+@pytest.mark.asyncio
+async def test_search_paste_cloud_benign_content_not_high_value(engagement_id, monkeypatch):
+    """Being on a genuine paste/cloud host that mentions the target is not,
+    by itself, exposure evidence - a public release-notes paste or a public
+    cloud docs page should be notable, not high_value. Only an actual
+    credential/secret pattern or a leak/dump/breach hint earns high_value."""
+    def route(method, url):
+        if "pastebin.com" in url:
+            return _searx([{"url": "https://pastebin.com/release-notes",
+                            "title": "example.com release notes",
+                            "content": "Public documentation", "engine": "bing"}])
+        if "s3.amazonaws.com" in url:
+            return _searx([{"url": "https://bucket.s3.amazonaws.com/readme",
+                            "title": "Example Company public documentation",
+                            "content": "Public documentation", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.company = "Example Company"
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    docs = {e.subject_value: e.raw_data.get("interest")
+            for e in await evidence_for(engagement_id, subject_type="document")}
+    assert docs.get("https://pastebin.com/release-notes") == "notable"
+    assert docs.get("https://bucket.s3.amazonaws.com/readme") == "notable"
+
+
+@pytest.mark.asyncio
+async def test_search_creds_prose_mention_not_high_value(engagement_id, monkeypatch):
+    """"How to reset your password" must not read as a leak just because it
+    satisfies a 'creds' dork - only an actual key=value/key: value pattern
+    (a real credential shape) earns high_value."""
+    def route(method, url):
+        if "intext%3A" in url or "intext:" in url:
+            return _searx([{"url": "https://example.com/help", "title": "Account help",
+                            "content": "How to reset your password", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    urls = {e.subject_value: e.raw_data.get("interest")
+            for e in await evidence_for(engagement_id, subject_type="url")}
+    assert urls.get("https://example.com/help") == "informational"
+
+
+@pytest.mark.asyncio
+async def test_search_rejected_page_does_not_promote_its_email(engagement_id, monkeypatch):
+    """An off-target/unverifiable page must not have its scraped email
+    promoted either - an @target-domain email string appearing on an
+    unrelated, rejected page is not corroboration of a real association."""
+    def route(method, url):
+        if "filetype%3Apdf" in url or "filetype:pdf" in url:
+            return _searx([{"url": "https://unrelated.invalid/page", "title": "Unrelated",
+                            "content": "ops@example.com", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="email") == []
+    unverified = {e.subject_value for e in
+                  await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    assert "https://unrelated.invalid/page" in unverified
+
+
+@pytest.mark.asyncio
 async def test_search_interest_not_derived_from_category_alone(engagement_id, monkeypatch):
     """An ordinary on-target page returned for a 'creds' query must not be
     stamped high_value just because of the dork category - only a result that
@@ -485,7 +584,7 @@ async def test_search_interest_not_derived_from_category_alone(engagement_id, mo
                 {"url": "https://example.com/about", "title": "About us",
                  "content": "Welcome to our website", "engine": "bing"},
                 {"url": "https://example.com/leaked-creds", "title": "Backup config",
-                 "content": "contains password and api_key for the admin panel",
+                 "content": "password=hunter2 api_key=sk-live-abc123",
                  "engine": "bing"},
             ])
         return _searx([])

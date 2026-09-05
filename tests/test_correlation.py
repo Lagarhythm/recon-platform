@@ -168,6 +168,47 @@ async def test_unverified_search_hit_is_evidence_only(engagement_id):
 
 
 @pytest.mark.asyncio
+async def test_rejected_page_email_does_not_reach_correlation_graph(engagement_id, monkeypatch):
+    """End-to-end ingestion -> correlation regression: search.py must not
+    extract an email from a page that failed the target-linkage gate (an
+    @target-domain email string on an unrelated/rejected page is not
+    corroboration of a real association) - and even if one somehow reached
+    Evidence, correlation must not turn it into an EMAIL asset here."""
+    import httpx
+
+    from recon.modules.osint.search import SearchDorkModule
+    from tests.harness import FakeHTTP, evidence_for, module_harness
+
+    monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: "searxng")
+    monkeypatch.setenv("RECON_SEARXNG_URL", "http://127.0.0.1:8888")
+    get_settings.cache_clear()
+
+    def _searx(results):
+        return httpx.Response(200, json={"query": "x", "results": results})
+
+    def route(method, url):
+        if "filetype%3Apdf" in url or "filetype:pdf" in url:
+            return _searx([{"url": "https://unrelated.invalid/page", "title": "Unrelated",
+                            "content": "ops@example.com", "engine": "bing"}])
+        return _searx([])
+
+    http = FakeHTTP({"127.0.0.1:8888": route})
+    async with module_harness(engagement_id, "search", http=http) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="email") == []
+    unverified = {e.subject_value for e in
+                  await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    assert "https://unrelated.invalid/page" in unverified
+
+    await _correlate(engagement_id)
+    assert await _assets(engagement_id, AssetType.EMAIL) == []
+    assert await _assets(engagement_id) == []
+
+
+@pytest.mark.asyncio
 async def test_christopher_earl_shape_off_target_search_hits_stay_out_of_graph(
     engagement_id, monkeypatch
 ):
