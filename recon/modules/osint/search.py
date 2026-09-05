@@ -33,16 +33,6 @@ _MAX_EMIT = 250
 _DORK_ECHO = re.compile(r"\b(site|inurl|intitle|filetype|intext)\s*:", re.IGNORECASE)
 _LINKEDIN_PROFILE = re.compile(r"^(?:[a-z]{2,3}\.)?linkedin\.com$", re.IGNORECASE)
 _FILETYPE_RE = re.compile(r"filetype:([A-Za-z0-9]+)", re.IGNORECASE)
-_CONFIG_EXTS = frozenset({"env", "yml", "conf", "ini", "log", "sql", "bak", "txt"})
-# An actual credential/secret pattern - a key=value/key:value shape, not just
-# the word "password" appearing in ordinary prose (a "reset your password"
-# help page must not read as a leak).
-_CRED_PATTERN = re.compile(
-    r"\b(password|passwd|api[_ -]?key|secret|token|credential)s?\s*[:=]\s*\S+", re.IGNORECASE
-)
-_SENSITIVE_HINT = re.compile(
-    r"\b(leak(?:ed)?|dump(?:ed)?|breach(?:ed)?|confidential|exposed|compromised)\b", re.IGNORECASE
-)
 _HOSTNAME_TOKEN_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
 )
@@ -189,7 +179,7 @@ def _classify_hit(
         name = _linkedin_name(res)
         if not name:                       # not a real linkedin.com/in/ profile
             return None
-        interest = _derive_interest(cat, None, blob)
+        interest = _derive_interest(cat)
         raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
                "snippet": res.snippet[:400], "engine": res.engine, "interest": interest}
         return [
@@ -198,13 +188,13 @@ def _classify_hit(
         ]
 
     if cat in ("social", "code", "collab"):
-        interest = _derive_interest(cat, None, blob)
+        interest = _derive_interest(cat)
         raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
                "snippet": res.snippet[:400], "engine": res.engine, "interest": interest}
         return [("social", res.url, raw, f"{cat}: {res.title or res.url}")]
 
     if cat in ("paste", "cloud"):
-        interest = _derive_interest(cat, None, blob)
+        interest = _derive_interest(cat)
         raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
                "snippet": res.snippet[:400], "engine": res.engine, "interest": interest}
         return [("document", res.url, raw, f"[{cat}] {res.title or res.url}")]
@@ -217,7 +207,7 @@ def _classify_hit(
     if cat in ("files", "config"):
         expected = _expected_extensions(query)
         if ext and expected and ext in expected:
-            interest = _derive_interest(cat, ext, blob)
+            interest = _derive_interest(cat)
             raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
                    "snippet": res.snippet[:400], "engine": res.engine, "interest": interest}
             return [("document", res.url, raw, f"[{cat}] {res.title or res.url}")]
@@ -226,33 +216,31 @@ def _classify_hit(
         return None
 
     if ext:
-        interest = _derive_interest(cat, ext, blob)
+        interest = _derive_interest(cat)
         raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
                "snippet": res.snippet[:400], "engine": res.engine, "interest": interest}
         return [("document", res.url, raw, f"[{cat}] {res.title or res.url}")]
 
     # panels / exposure / creds / anything else on-target -> url finding.
-    interest = _derive_interest(cat, None, blob)
+    interest = _derive_interest(cat)
     raw = {"source": f"dork/{cat}", "query": query, "title": res.title,
            "snippet": res.snippet[:400], "engine": res.engine, "interest": interest}
     return [("url", res.url, raw, f"[{cat}] {res.title or res.url}")]
 
 
-def _derive_interest(cat: str, ext: str | None, blob: str) -> str:
-    """Interest from the validated result, not the dork that produced it - an
-    on-target page that happens to satisfy a "creds" query isn't high_value
-    unless it actually looks like a credential/secret artefact, and being on
-    a genuine paste/cloud host isn't itself exposure evidence (a public
-    release note or public docs page hosted there is still just notable)."""
-    if cat == "config" and ext in _CONFIG_EXTS:
-        return "high_value"
-    if cat in ("paste", "cloud"):
-        if _CRED_PATTERN.search(blob) or _SENSITIVE_HINT.search(blob):
-            return "high_value"
-        return "notable"
-    if cat == "creds" and _CRED_PATTERN.search(blob):
-        return "high_value"
-    if cat in ("exposure", "panels", "files", "collab"):
+def _derive_interest(cat: str) -> str:
+    """Interest from the validated result, not the dork that produced it -
+    and never from a snippet keyword or phrase. Natural language about
+    security topics defeats any keyword heuristic: "no data was leaked",
+    a breach-prevention guide, and "Password: required when signing in"
+    all use the same vocabulary as a genuine leak - a fourth keyword pass
+    would not close that mechanism, so this module never emits high_value
+    at all. An indexed .env or a paste/cloud host mentioning the target is a
+    candidate worth surfacing, not proven exposure - that requires fetching
+    the artifact and inspecting real content, which is deferred enrichment,
+    not something a SERP snippet can establish. Everything here tops out at
+    notable."""
+    if cat in ("config", "exposure", "panels", "files", "collab", "paste", "cloud"):
         return "notable"
     return "informational"
 

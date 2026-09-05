@@ -502,16 +502,24 @@ async def test_search_domain_lookalike_hostname_variants_not_target_linked(
 
 
 @pytest.mark.asyncio
-async def test_search_paste_cloud_benign_content_not_high_value(engagement_id, monkeypatch):
+async def test_search_paste_cloud_content_never_high_value(engagement_id, monkeypatch):
     """Being on a genuine paste/cloud host that mentions the target is not,
-    by itself, exposure evidence - a public release-notes paste or a public
-    cloud docs page should be notable, not high_value. Only an actual
-    credential/secret pattern or a leak/dump/breach hint earns high_value."""
+    by itself, exposure evidence. Nor is any snippet keyword: a keyword
+    heuristic can't tell a real leak from "no data was leaked or
+    compromised" - so the search module never emits high_value for
+    paste/cloud at all, from any content. A genuine leak is a candidate
+    worth surfacing (notable), not proven exposure until someone fetches and
+    inspects the actual artifact."""
     def route(method, url):
         if "pastebin.com" in url:
-            return _searx([{"url": "https://pastebin.com/release-notes",
-                            "title": "example.com release notes",
-                            "content": "Public documentation", "engine": "bing"}])
+            return _searx([
+                {"url": "https://pastebin.com/release-notes",
+                 "title": "example.com release notes",
+                 "content": "Public documentation", "engine": "bing"},
+                {"url": "https://pastebin.com/status",
+                 "title": "example.com security update",
+                 "content": "No data was leaked or compromised", "engine": "bing"},
+            ])
         if "s3.amazonaws.com" in url:
             return _searx([{"url": "https://bucket.s3.amazonaws.com/readme",
                             "title": "Example Company public documentation",
@@ -527,18 +535,26 @@ async def test_search_paste_cloud_benign_content_not_high_value(engagement_id, m
     docs = {e.subject_value: e.raw_data.get("interest")
             for e in await evidence_for(engagement_id, subject_type="document")}
     assert docs.get("https://pastebin.com/release-notes") == "notable"
+    assert docs.get("https://pastebin.com/status") == "notable"
     assert docs.get("https://bucket.s3.amazonaws.com/readme") == "notable"
 
 
 @pytest.mark.asyncio
-async def test_search_creds_prose_mention_not_high_value(engagement_id, monkeypatch):
-    """"How to reset your password" must not read as a leak just because it
-    satisfies a 'creds' dork - only an actual key=value/key: value pattern
-    (a real credential shape) earns high_value."""
+async def test_search_creds_content_never_high_value(engagement_id, monkeypatch):
+    """Neither "how to reset your password" nor a real-looking
+    "password=hunter2" snippet earns high_value from a "creds" dork - a SERP
+    snippet can't establish exposure either way, so this category always
+    tops out at informational (it isn't in the notable set either, since an
+    on-target hit satisfying a loose intext: query isn't inherently
+    noteworthy the way a directory listing or admin panel is)."""
     def route(method, url):
         if "intext%3A" in url or "intext:" in url:
-            return _searx([{"url": "https://example.com/help", "title": "Account help",
-                            "content": "How to reset your password", "engine": "bing"}])
+            return _searx([
+                {"url": "https://example.com/help", "title": "Account help",
+                 "content": "How to reset your password", "engine": "bing"},
+                {"url": "https://example.com/leaked-creds", "title": "Backup config",
+                 "content": "password=hunter2 api_key=sk-live-abc123", "engine": "bing"},
+            ])
         return _searx([])
 
     async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
@@ -549,6 +565,59 @@ async def test_search_creds_prose_mention_not_high_value(engagement_id, monkeypa
     urls = {e.subject_value: e.raw_data.get("interest")
             for e in await evidence_for(engagement_id, subject_type="url")}
     assert urls.get("https://example.com/help") == "informational"
+    assert urls.get("https://example.com/leaked-creds") == "informational"
+
+
+@pytest.mark.asyncio
+async def test_search_config_extension_is_notable_not_high_value(engagement_id, monkeypatch):
+    """An indexed .env file is a candidate worth surfacing, not proven
+    exposure - config-by-extension caps at notable, same as every other
+    category, since nobody has fetched and inspected its actual content."""
+    def route(method, url):
+        if "filetype%3Aenv" in url or "filetype:env" in url:
+            return _searx([{"url": "https://example.com/.env", "title": ".env",
+                            "content": "", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    docs = {e.subject_value: e.raw_data.get("interest")
+            for e in await evidence_for(engagement_id, subject_type="document")}
+    assert docs.get("https://example.com/.env") == "notable"
+
+
+@pytest.mark.asyncio
+async def test_search_never_emits_high_value_interest(engagement_id, monkeypatch):
+    """Structural invariant: the search module never stamps high_value on
+    anything, for any category or content - a SERP title/snippet can't
+    establish real exposure, only fetching and inspecting the actual
+    artifact can (deferred enrichment, ticketed separately). Covers every
+    category that used to reach high_value under the old category- or
+    keyword-based rules."""
+    def route(method, url):
+        if "filetype%3Aenv" in url or "filetype:env" in url:
+            return _searx([{"url": "https://example.com/leak.env", "title": ".env",
+                            "content": "DB_PASSWORD=hunter2 SECRET_KEY=abc123", "engine": "bing"}])
+        if "intext%3A" in url or "intext:" in url:
+            return _searx([{"url": "https://example.com/admin/creds", "title": "creds",
+                            "content": "password=hunter2 api_key=sk-live-abc123", "engine": "bing"}])
+        if "pastebin.com" in url:
+            return _searx([{"url": "https://pastebin.com/leak", "title": "example.com breach",
+                            "content": "database dump leaked, confidential, compromised",
+                            "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    all_evidence = await evidence_for(engagement_id)
+    assert all_evidence  # sanity: the fixture actually produced evidence
+    assert all(e.raw_data.get("interest") != "high_value" for e in all_evidence)
 
 
 @pytest.mark.asyncio
@@ -571,33 +640,6 @@ async def test_search_rejected_page_does_not_promote_its_email(engagement_id, mo
     unverified = {e.subject_value for e in
                   await evidence_for(engagement_id, subject_type="unverified_search_hit")}
     assert "https://unrelated.invalid/page" in unverified
-
-
-@pytest.mark.asyncio
-async def test_search_interest_not_derived_from_category_alone(engagement_id, monkeypatch):
-    """An ordinary on-target page returned for a 'creds' query must not be
-    stamped high_value just because of the dork category - only a result that
-    actually looks like a credential/secret artefact earns that."""
-    def route(method, url):
-        if "intext%3A" in url or "intext:" in url:
-            return _searx([
-                {"url": "https://example.com/about", "title": "About us",
-                 "content": "Welcome to our website", "engine": "bing"},
-                {"url": "https://example.com/leaked-creds", "title": "Backup config",
-                 "content": "password=hunter2 api_key=sk-live-abc123",
-                 "engine": "bing"},
-            ])
-        return _searx([])
-
-    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
-        ctx.roe.osint.seed_domains = ["example.com"]
-        await SearchDorkModule().run(ctx)
-    get_settings.cache_clear()
-
-    urls = {e.subject_value: e.raw_data.get("interest")
-            for e in await evidence_for(engagement_id, subject_type="url")}
-    assert urls.get("https://example.com/about") == "informational"
-    assert urls.get("https://example.com/leaked-creds") == "high_value"
 
 
 @pytest.mark.asyncio
