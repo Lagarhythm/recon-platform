@@ -174,12 +174,22 @@ async def test_christopher_earl_shape_off_target_search_hits_stay_out_of_graph(
     """End-to-end ingestion -> correlation regression for the failed
     "Christopher Earl" practice scan: a search backend that ignores site:/
     filetype: operators and returns unrelated hosts (Correos de Mexico,
-    BLS.gov, Census, Zippia, Xbox status) must not leave any Asset, Finding,
-    or AssetRelationship behind after correlation, in a fresh engagement."""
+    BLS.gov, Census, Zippia, Xbox status) must not leave any Asset or
+    AssetRelationship behind after correlation, in a fresh engagement.
+
+    Each off-target hit is returned only for its own dork query (not a single
+    list reused for every query) so every category's branch - files, config,
+    panels, people, social - is actually exercised, per the review finding
+    that a shared fixture + the old seen-before-validation bug let a
+    rejection from an earlier query silently hide later, unrelated bypasses.
+    Includes a positive control (a genuine LinkedIn profile, a genuine paste
+    hit) to prove the gate isn't just rejecting everything, and a
+    reject-then-valid case: the same pastebin URL is first returned (and
+    rejected) under the "files" dork, then correctly accepted under "paste"."""
     import httpx
 
     from recon.modules.osint.search import SearchDorkModule
-    from tests.harness import FakeHTTP, module_harness
+    from tests.harness import FakeHTTP, evidence_for, module_harness
 
     monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: "searxng")
     monkeypatch.setenv("RECON_SEARXNG_URL", "http://127.0.0.1:8888")
@@ -188,21 +198,50 @@ async def test_christopher_earl_shape_off_target_search_hits_stay_out_of_graph(
     def _searx(results):
         return httpx.Response(200, json={"query": "x", "results": results})
 
-    off_target_hits = [
-        {"url": "https://www.correos.gob.mx/page", "title": "Correos de Mexico",
-         "content": "servicio postal", "engine": "bing"},
-        {"url": "https://www.bls.gov/some/report.pdf", "title": "BLS report",
-         "content": "labor statistics", "engine": "bing"},
-        {"url": "https://www.census.gov/data.xlsx", "title": "Census data",
-         "content": "population", "engine": "bing"},
-        {"url": "https://www.zippia.com/christopher-earl", "title": "Christopher Earl - Zippia",
-         "content": "career profile", "engine": "bing"},
-        {"url": "https://support.xbox.com/status", "title": "Xbox Live status",
-         "content": "service status", "engine": "bing"},
+    off_target_urls = [
+        "https://www.correos.gob.mx/page",
+        "https://www.census.gov/data.xlsx",
+        "https://www.bls.gov/some/report.sql",
+        "https://support.xbox.com/status",
+        "https://www.zippia.com/christopher-earl",
     ]
 
     def route(method, url):
-        return _searx(off_target_hits)
+        if "filetype%3Apdf" in url or "filetype:pdf" in url:
+            # off-target Correos de Mexico hit, plus the reject-then-valid
+            # pastebin URL returned (and correctly rejected) under "files".
+            return _searx([
+                {"url": "https://www.correos.gob.mx/page", "title": "Correos de Mexico",
+                 "content": "servicio postal", "engine": "bing"},
+                {"url": "https://pastebin.com/shared-secret", "title": "sinewbyte.com data leak",
+                 "content": "", "engine": "bing"},
+            ])
+        if "filetype%3Axls" in url or "filetype:xls" in url:
+            return _searx([{"url": "https://www.census.gov/data.xlsx", "title": "Census data",
+                            "content": "population", "engine": "bing"}])
+        if "filetype%3Aenv" in url or "filetype:env" in url:
+            return _searx([{"url": "https://www.bls.gov/some/report.sql", "title": "BLS report",
+                            "content": "labor statistics", "engine": "bing"}])
+        if "wp-admin" in url:
+            return _searx([{"url": "https://support.xbox.com/status", "title": "Xbox Live status",
+                            "content": "service status", "engine": "bing"}])
+        if "linkedin.com" in url:
+            return _searx([
+                {"url": "https://www.zippia.com/christopher-earl",
+                 "title": "Christopher Earl - Zippia", "content": "career profile",
+                 "engine": "bing"},
+                {"url": "https://linkedin.com/in/christopher-earl",
+                 "title": "Christopher Earl - CEO at Sinewbyte | LinkedIn",
+                 "content": "Christopher Earl", "engine": "bing"},
+            ])
+        if "twitter.com" in url or "x.com" in url:
+            return _searx([{"url": "https://www.zippia.com/christopher-earl",
+                            "title": "Christopher Earl - Zippia", "content": "career profile",
+                            "engine": "bing"}])
+        if "pastebin.com" in url:
+            return _searx([{"url": "https://pastebin.com/shared-secret",
+                            "title": "sinewbyte.com data leak", "content": "", "engine": "bing"}])
+        return _searx([])
 
     http = FakeHTTP({"127.0.0.1:8888": route})
     async with module_harness(engagement_id, "search", http=http) as ctx:
@@ -211,13 +250,24 @@ async def test_christopher_earl_shape_off_target_search_hits_stay_out_of_graph(
         await SearchDorkModule().run(ctx)
     get_settings.cache_clear()
 
-    from tests.harness import evidence_for
-
-    unverified = await evidence_for(engagement_id, subject_type="unverified_search_hit")
-    assert len(unverified) >= len(off_target_hits)
+    unverified_values = {e.subject_value for e in
+                          await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    for url in off_target_urls:
+        assert url in unverified_values
 
     await _correlate(engagement_id)
-    assert await _assets(engagement_id) == []
+
+    asset_values = {a.value for a in await _assets(engagement_id)}
+    for url in off_target_urls:
+        assert url not in asset_values
+    assert await _assets(engagement_id, AssetType.FINDING) == []
+
+    # positive controls: the gate isn't rejecting everything
+    people = {a.value for a in await _assets(engagement_id, AssetType.PERSON)}
+    assert "Christopher Earl" in people
+    docs = {a.value for a in await _assets(engagement_id, AssetType.DOCUMENT)}
+    assert "https://pastebin.com/shared-secret" in docs
+
     async with session_scope() as s:
         rels = list((await s.execute(select(AssetRelationship))).scalars())
     assert rels == []

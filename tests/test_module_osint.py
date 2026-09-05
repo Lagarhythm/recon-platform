@@ -421,6 +421,129 @@ async def test_search_code_dork_requires_domain_string_in_hit(engagement_id, mon
     assert social == {"https://github.com/example-com/infra"}
 
 
+@pytest.mark.asyncio
+async def test_search_off_platform_host_not_promoted_despite_target_mention(
+    engagement_id, monkeypatch
+):
+    """A career-aggregator-style page on a host that is NOT the category's
+    real platform (not linkedin/twitter/trello/...) must not become a social
+    asset just because it mentions the company - this was the exact "Zippia"
+    failure mode from the Christopher Earl scan, reproduced here for the
+    people/social/collab categories with a synthetic off-platform host."""
+    def route(method, url):
+        if ("twitter.com" in url or "trello.com" in url or "linkedin.com" in url):
+            return _searx([{"url": "https://unrelated.invalid/article",
+                            "title": "Example Company profile", "content": "Example Company",
+                            "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.company = "Example Company"
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="social") == []
+    assert await evidence_for(engagement_id, subject_type="person") == []
+    unverified = {e.subject_value for e in
+                  await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    assert "https://unrelated.invalid/article" in unverified
+
+
+@pytest.mark.asyncio
+async def test_search_domain_lookalike_text_not_target_linked(engagement_id, monkeypatch):
+    """A paste-site hit whose title only contains "notexample.com" (a lookalike
+    substring of target domain "example.com") must not be treated as
+    mentioning the target - text matching needs the same label boundary as
+    host matching."""
+    def route(method, url):
+        if "pastebin.com" in url:
+            return _searx([{"url": "https://pastebin.com/xyz",
+                            "title": "notexample.com information", "content": "",
+                            "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="document") == []
+    unverified = {e.subject_value for e in
+                  await evidence_for(engagement_id, subject_type="unverified_search_hit")}
+    assert "https://pastebin.com/xyz" in unverified
+
+
+@pytest.mark.asyncio
+async def test_search_interest_not_derived_from_category_alone(engagement_id, monkeypatch):
+    """An ordinary on-target page returned for a 'creds' query must not be
+    stamped high_value just because of the dork category - only a result that
+    actually looks like a credential/secret artefact earns that."""
+    def route(method, url):
+        if "intext%3A" in url or "intext:" in url:
+            return _searx([
+                {"url": "https://example.com/about", "title": "About us",
+                 "content": "Welcome to our website", "engine": "bing"},
+                {"url": "https://example.com/leaked-creds", "title": "Backup config",
+                 "content": "contains password and api_key for the admin panel",
+                 "engine": "bing"},
+            ])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    urls = {e.subject_value: e.raw_data.get("interest")
+            for e in await evidence_for(engagement_id, subject_type="url")}
+    assert urls.get("https://example.com/about") == "informational"
+    assert urls.get("https://example.com/leaked-creds") == "high_value"
+
+
+@pytest.mark.asyncio
+async def test_search_filetype_dork_rejects_wrong_extension(engagement_id, monkeypatch):
+    """A .csv result returned for a filetype:pdf query must not become a
+    document - the requested extension has to actually match."""
+    def route(method, url):
+        if "filetype%3Apdf" in url or "filetype:pdf" in url:
+            return _searx([{"url": "https://example.com/manual.csv", "title": "Manual",
+                            "content": "", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    assert await evidence_for(engagement_id, subject_type="document") == []
+
+
+@pytest.mark.asyncio
+async def test_search_rejection_under_one_category_does_not_suppress_other(
+    engagement_id, monkeypatch
+):
+    """The same URL, off-target under a 'files' query (wrong host) and then
+    genuinely target-linked under a 'paste' query, must still be accepted the
+    second time - a rejection must not poison the per-run dedup set."""
+    def route(method, url):
+        if "filetype%3Apdf" in url or "filetype:pdf" in url:
+            return _searx([{"url": "https://pastebin.com/shared", "title": "example.com data",
+                            "content": "", "engine": "bing"}])
+        if "pastebin.com" in url:
+            return _searx([{"url": "https://pastebin.com/shared", "title": "example.com data",
+                            "content": "", "engine": "bing"}])
+        return _searx([])
+
+    async with _search_ctx(engagement_id, monkeypatch, {"127.0.0.1:8888": route}) as ctx:
+        ctx.roe.osint.seed_domains = ["example.com"]
+        await SearchDorkModule().run(ctx)
+    get_settings.cache_clear()
+
+    docs = {e.subject_value for e in await evidence_for(engagement_id, subject_type="document")}
+    assert "https://pastebin.com/shared" in docs
+
+
 # --------------------------------------------------------------------------- #
 # domain-boundary regressions (suffix-match vs. label-match)
 # --------------------------------------------------------------------------- #
