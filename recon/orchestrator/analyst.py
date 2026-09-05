@@ -250,11 +250,7 @@ class AnalystService:
         analysis.raw_response = result.content
         analysis.usage = result.usage
         analysis.model = result.model
-        valid_refs = {
-            ref["id"]
-            for item in payload.get("findings", []) + payload.get("notable_urls", [])
-            for ref in item.get("evidence_references", [])
-        }
+        valid_refs = _payload_evidence_refs(payload)
         parsed = _parse(result.content, valid_evidence_refs=valid_refs)
         analysis.summary = parsed["summary"]
         analysis.priorities = parsed["priorities"]
@@ -287,6 +283,21 @@ def _drop_exploitation(steps: list[str]) -> list[str]:
     return kept
 
 
+def _payload_evidence_refs(payload: object) -> set[str]:
+    """Collect references from every evidence-bearing section sent to the LLM."""
+    refs: set[str] = set()
+    if isinstance(payload, dict):
+        for ref in payload.get("evidence_references", []):
+            if isinstance(ref, dict) and ref.get("id"):
+                refs.add(str(ref["id"]))
+        for value in payload.values():
+            refs.update(_payload_evidence_refs(value))
+    elif isinstance(payload, list):
+        for value in payload:
+            refs.update(_payload_evidence_refs(value))
+    return refs
+
+
 def _parse(content: str | None, *, valid_evidence_refs: set[str] | None = None) -> dict:
     if not content or not str(content).strip():
         return {"summary": "(model returned no content)", "priorities": [], "next_steps": []}
@@ -312,7 +323,8 @@ def _parse(content: str | None, *, valid_evidence_refs: set[str] | None = None) 
     if valid_evidence_refs is not None:
         priorities = [
             priority for priority in priorities
-            if set(re.findall(r"\[evidence:([^\]]+)\]", priority, flags=re.IGNORECASE)) & valid_evidence_refs
+            if (refs := set(re.findall(r"\[evidence:([^\]]+)\]", priority, flags=re.IGNORECASE)))
+            and refs.issubset(valid_evidence_refs)
         ]
     return {
         "summary": str(obj.get("summary", "")).strip(),

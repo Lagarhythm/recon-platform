@@ -19,6 +19,7 @@ from recon.orchestrator.analyst import (
     _compact,
     _drop_exploitation,
     _parse,
+    _payload_evidence_refs,
 )
 from recon.reporting.collect import build_report_data
 from recon.reporting.redaction import RedactionMode, redact_report
@@ -225,7 +226,38 @@ def test_compact_preserves_upstream_and_reference_and_never_infers_ownership():
     assert finding["attribution"] == "uncertain"
     assert "crt.sh" in finding["sources"]
     assert finding["evidence_references"][0]["id"] == "evidence-one"
-    assert _parse('{"priorities":["bad [evidence:nope]", "good [evidence:evidence-one]"]}', valid_evidence_refs={"evidence-one"})["priorities"] == ["good [evidence:evidence-one]"]
+    assert _parse('{"priorities":["bad [evidence:nope]", "good [evidence:evidence-one]", "mixed [evidence:evidence-one] [evidence:nope]"]}', valid_evidence_refs={"evidence-one"})["priorities"] == ["good [evidence:evidence-one]"]
+    assert _payload_evidence_refs({"osint": {"repositories": [finding]}}) == {"evidence-one"}
+
+
+@pytest.mark.asyncio
+async def test_analyst_accepts_a_valid_osint_evidence_reference(engagement_id, monkeypatch):
+    async with session_scope() as session:
+        eng = await session.get(Engagement, engagement_id)
+        eng.llm_analysis_enabled = True
+        asset = Asset(engagement_id=engagement_id, type=AssetType.REPOSITORY,
+                      value="https://github.com/example/demo", confidence_score=.5,
+                      interest_level=InterestLevel.INFORMATIONAL,
+                      in_scope_status=ScopeStatus.NOT_APPLICABLE)
+        session.add(asset)
+        await session.flush()
+        session.add(Evidence(engagement_id=engagement_id, asset_id=asset.id,
+                              source_module="github_org", subject_type="repository",
+                              subject_value=asset.value, summary="Public repository candidate",
+                              raw_data={"source": "github"}))
+
+    async def fake_chat(self, system, user, **kwargs):
+        ref = json.loads(user)["osint"]["repositories"][0]["evidence_references"][0]["id"]
+        from recon.llm.client import LLMResult
+        return LLMResult(content=json.dumps({"summary": "Candidate repository.",
+                         "priorities": [f"Verify repository association [evidence:{ref}]"],
+                         "next_steps": []}), model="synthetic-review", usage={})
+
+    monkeypatch.setattr("recon.llm.client.LLMClient.chat", fake_chat)
+    async with session_scope() as session:
+        eng = await session.get(Engagement, engagement_id)
+        result = await AnalystService().run(session, eng)
+        assert len(result.priorities) == 1
 
 
 @pytest.mark.asyncio
