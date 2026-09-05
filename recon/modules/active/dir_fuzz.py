@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import re
 import tempfile
-from collections import Counter
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -31,6 +30,7 @@ def _safe_root(url: str) -> bool:
 from recon.config import get_settings
 from recon.models.enums import ModulePhase, ScopeStatus
 from recon.modules._live_hosts import probed_hosts
+from recon.modules._soft404 import filter_soft_404
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 from recon.net.external import find_binary, run_command
@@ -162,7 +162,7 @@ class DirFuzzModule(ReconModule):
                 )
             return
 
-        kept = self._filter_soft_404(results)
+        kept = filter_soft_404(results, cluster_threshold=_SOFT404_CLUSTER)
         for r in kept:
             ctx.check_alive()
             url = r.get("url") or f"{root.rstrip('/')}/{r.get('input', {}).get('FUZZ', '')}"
@@ -187,16 +187,3 @@ class DirFuzzModule(ReconModule):
             f"ffuf {root}: {len(results)} raw, {len(kept)} after soft-404 filter"
         )
 
-    @staticmethod
-    def _filter_soft_404(results: list[dict]) -> list[dict]:
-        """Drop hits whose (status, length, words, lines) signature is shared by
-        a large cluster - the hallmark of a catch-all handler."""
-        sig = Counter(
-            (r.get("status"), r.get("length"), r.get("words"), r.get("lines"))
-            for r in results
-        )
-        return [
-            r for r in results
-            if sig[(r.get("status"), r.get("length"), r.get("words"), r.get("lines"))]
-            <= _SOFT404_CLUSTER
-        ]
