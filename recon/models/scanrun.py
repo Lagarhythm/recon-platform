@@ -65,6 +65,11 @@ class ScanModuleRun(UUIDPk, Base):
 
     evidence_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Safe, operator-facing coverage caveats emitted by the module (for
+    # example, configured source exclusions).  This is deliberately separate
+    # from error text so a skipped check cannot be rendered as a clean empty
+    # result and so reports never need to infer coverage from log prose.
+    coverage_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTimeUTC, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTimeUTC, nullable=True)

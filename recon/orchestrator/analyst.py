@@ -40,11 +40,12 @@ _SYSTEM = (
     "domain / netblock / repo / people footprint, and what that footprint "
     "implies. Be specific and use the actual values from the data - do not pad "
     "with generic advice.\n"
-    '  "priorities": ordered list of strings, most important first - the '
+    '  "priorities": ordered list of strings, most important first - every '
     "specific hosts/services/findings an operator should look at first and why. "
     "Give each one a sentence or two of rationale. Group by host where it helps. "
     "Name the actual values from the data. Aim for 5-12 entries when the data "
-    "supports it. Frame each as what to examine, confirm, or map - not an attack "
+    "supports it. Each priority MUST end with one or more exact evidence references "
+    "from the supplied data in the form [evidence:<id>]. Frame each as what to examine, confirm, or map - not an attack "
     "to run (no 'test default credentials', no 'attempt bypass').\n"
     '  "next_steps": list of strings - concrete additional RECON actions only '
     "(enumerate X, fingerprint Y, verify whether Z). Include a 'verify' step for "
@@ -68,6 +69,48 @@ def _evidence_lines(asset: dict) -> list[str]:
         if len(out) >= _MAX_EVID_PER_FINDING:
             break
     return out
+
+
+def _evidence_refs(asset: dict) -> list[dict]:
+    """Keep stable references plus safe upstream identities in the LLM view."""
+    refs: list[dict] = []
+    for e in asset.get("evidence", []):
+        evidence_id = e.get("id")
+        if not evidence_id:
+            continue
+        raw = e.get("raw_data") or {}
+        source = raw.get("source")
+        refs.append({
+            "id": str(evidence_id),
+            "module": e.get("module"),
+            "upstream_source": str(source)[:128] if isinstance(source, str) else None,
+            "summary": (e.get("summary") or "")[:500],
+        })
+        if len(refs) >= _MAX_EVID_PER_FINDING:
+            break
+    return refs
+
+
+def _sources(asset: dict) -> list[str]:
+    sources: list[str] = []
+    for e in asset.get("evidence", []):
+        for source in (e.get("module"), (e.get("raw_data") or {}).get("source")):
+            if isinstance(source, str) and source and source not in sources:
+                sources.append(source[:128])
+    return sources
+
+
+def _attribution(asset: dict) -> str:
+    """Ownership is unknown unless an evidence record explicitly supports it.
+
+    Scope authorizes activity and confidence corroborates existence; neither is
+    proof that the client owns a discovered asset.
+    """
+    for evidence in asset.get("evidence", []):
+        raw = evidence.get("raw_data") or {}
+        if raw.get("attribution_evidence") is True:
+            return "supported"
+    return "uncertain"
 
 
 def _compact(redacted: dict) -> dict:
@@ -107,8 +150,9 @@ def _compact(redacted: dict) -> dict:
             "value": a["value"],
             "interest": a.get("interest"),
             "confidence": a.get("confidence"), "scope": a.get("scope"),
-            "attribution": "uncertain" if a.get("scope") != "in_scope" or (a.get("confidence") or 0) < .7 else "confirmed",
-            "sources": [e.get("module") for e in a.get("evidence", []) if e.get("module")],
+            "attribution": _attribution(a),
+            "sources": _sources(a),
+            "evidence_references": _evidence_refs(a),
             "evidence": _evidence_lines(a),
         }
         for a in sorted(redacted.get("findings", []), key=interest_rank)
@@ -116,7 +160,8 @@ def _compact(redacted: dict) -> dict:
     ]
     notable_urls = [
         {"value": a["value"], "interest": a.get("interest"), "confidence": a.get("confidence"),
-         "scope": a.get("scope"), "sources": [e.get("module") for e in a.get("evidence", []) if e.get("module")]}
+         "scope": a.get("scope"), "sources": _sources(a),
+         "evidence_references": _evidence_refs(a)}
         for a in sorted(by_type.get("url", []), key=interest_rank)
         if a.get("interest") in ("high_value", "notable")
     ][:_MAX_NOTABLE_URLS]
@@ -130,7 +175,7 @@ def _compact(redacted: dict) -> dict:
 
     def _vals(t: str) -> list[dict]:
         return [{"value": a["value"], "confidence": a.get("confidence"), "scope": a.get("scope"),
-                 "sources": [e.get("module") for e in a.get("evidence", []) if e.get("module")], "evidence": _evidence_lines(a)}
+                 "sources": _sources(a), "evidence_references": _evidence_refs(a), "evidence": _evidence_lines(a)}
                 for a in by_type.get(t, [])]
 
     osint = {}
@@ -205,7 +250,12 @@ class AnalystService:
         analysis.raw_response = result.content
         analysis.usage = result.usage
         analysis.model = result.model
-        parsed = _parse(result.content)
+        valid_refs = {
+            ref["id"]
+            for item in payload.get("findings", []) + payload.get("notable_urls", [])
+            for ref in item.get("evidence_references", [])
+        }
+        parsed = _parse(result.content, valid_evidence_refs=valid_refs)
         analysis.summary = parsed["summary"]
         analysis.priorities = parsed["priorities"]
         analysis.next_steps = _drop_exploitation(parsed["next_steps"])
@@ -237,7 +287,7 @@ def _drop_exploitation(steps: list[str]) -> list[str]:
     return kept
 
 
-def _parse(content: str | None) -> dict:
+def _parse(content: str | None, *, valid_evidence_refs: set[str] | None = None) -> dict:
     if not content or not str(content).strip():
         return {"summary": "(model returned no content)", "priorities": [], "next_steps": []}
     text = str(content).strip()
@@ -258,8 +308,14 @@ def _parse(content: str | None) -> dict:
                 return {"summary": text[:4000], "priorities": [], "next_steps": []}
         else:
             return {"summary": text[:4000], "priorities": [], "next_steps": []}
+    priorities = [str(x) for x in obj.get("priorities", []) if str(x).strip()]
+    if valid_evidence_refs is not None:
+        priorities = [
+            priority for priority in priorities
+            if set(re.findall(r"\[evidence:([^\]]+)\]", priority, flags=re.IGNORECASE)) & valid_evidence_refs
+        ]
     return {
         "summary": str(obj.get("summary", "")).strip(),
-        "priorities": [str(x) for x in obj.get("priorities", []) if str(x).strip()],
+        "priorities": priorities,
         "next_steps": [str(x) for x in obj.get("next_steps", []) if str(x).strip()],
     }

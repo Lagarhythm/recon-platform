@@ -10,13 +10,15 @@ from sqlalchemy import select
 from recon.db import session_scope
 from recon.models.asset import Asset
 from recon.models.engagement import Engagement
-from recon.models.enums import AssetType, FindingPolarity, InterestLevel, ScopeStatus
+from recon.models.enums import AssetType, FindingPolarity, InterestLevel, ModulePhase, ModuleRunStatus, ScopeStatus
 from recon.models.evidence import Evidence
+from recon.models.scanrun import ScanModuleRun, ScanRun
 from recon.orchestrator.analyst import (
     AnalystError,
     AnalystService,
     _compact,
     _drop_exploitation,
+    _parse,
 )
 from recon.reporting.collect import build_report_data
 from recon.reporting.redaction import RedactionMode, redact_report
@@ -152,11 +154,15 @@ async def test_analyst_runs_with_mocked_llm(engagement_id, monkeypatch):
 
     async def fake_chat(self, system, user, **kw):
         captured["user"] = user
+        evidence_id = next(
+            ref["id"] for finding in json.loads(user)["findings"]
+            for ref in finding["evidence_references"]
+        )
         from recon.llm.client import LLMResult
         return LLMResult(
             content=json.dumps({
                 "summary": "Small external surface; one leaked AWS key is the priority.",
-                "priorities": ["Rotate the exposed AWS key", "Review api.example.com"],
+                "priorities": [f"Review the reported finding [evidence:{evidence_id}]", "Ungrounded priority"],
                 "next_steps": ["Enumerate api.example.com endpoints"],
             }),
             model="test-model",
@@ -180,7 +186,7 @@ async def test_analyst_runs_with_mocked_llm(engagement_id, monkeypatch):
     async with session_scope() as s:
         from recon.models.analysis import Analysis
         a = await s.get(Analysis, aid)
-        assert a.priorities[0].startswith("Rotate")
+        assert a.priorities and a.priorities[0].startswith("Review the reported finding [evidence:")
         assert a.model == "test-model"
 
 
@@ -199,8 +205,54 @@ async def test_compact_payload_is_lean_and_keeps_signal(engagement_id):
     assert any(v.startswith("secret:aws_access_key") for v in vals)
     # each finding carries its evidence lines, not full raw_data blobs
     assert all(isinstance(f.get("evidence"), list) for f in p["findings"])
+    assert any(f.get("evidence_references") for f in p["findings"])
     # the missing-DNSSEC negative finding is surfaced as a missing control
     assert any("DNSSEC" in m for m in p["missing_controls"])
+
+
+def test_compact_preserves_upstream_and_reference_and_never_infers_ownership():
+    asset = {
+        "value": "candidate.example.com", "type": "finding", "interest": "notable",
+        "confidence": .95, "scope": "in_scope", "evidence": [{
+            "id": "evidence-one", "module": "ct_subdomains", "summary": "observed",
+            "raw_data": {"source": "crt.sh"},
+        }],
+    }
+    payload = _compact({"assets": [asset], "findings": [asset], "summary": {},
+                        "engagement": {"name": "test"}, "negative_findings": [],
+                        "relationships": [], "scan_runs": []})
+    finding = payload["findings"][0]
+    assert finding["attribution"] == "uncertain"
+    assert "crt.sh" in finding["sources"]
+    assert finding["evidence_references"][0]["id"] == "evidence-one"
+    assert _parse('{"priorities":["bad [evidence:nope]", "good [evidence:evidence-one]"]}', valid_evidence_refs={"evidence-one"})["priorities"] == ["good [evidence:evidence-one]"]
+
+
+@pytest.mark.asyncio
+async def test_skipped_coverage_and_exclusions_are_reported(engagement_id):
+    async with session_scope() as s:
+        eng = await s.get(Engagement, engagement_id)
+        run = ScanRun(engagement_id=engagement_id, roe_config_snapshot={}, roe_config_hash=eng.roe_config_hash,
+                      status="completed", modules_requested=["passive_subdomains", "git_secrets"])
+        s.add(run)
+        await s.flush()
+        s.add_all([
+            ScanModuleRun(scan_run_id=run.id, engagement_id=engagement_id, module_name="passive_subdomains",
+                          phase=ModulePhase.OSINT, status=ModuleRunStatus.SKIPPED,
+                          error="all passive sources disabled by configuration"),
+            ScanModuleRun(scan_run_id=run.id, engagement_id=engagement_id, module_name="git_secrets",
+                          phase=ModulePhase.OSINT, status=ModuleRunStatus.COMPLETED,
+                          coverage_metadata={"excluded_repositories": ["lagarhythm/recon-platform"],
+                                             "excluded_path_policies": ["tests/**"]}),
+        ])
+    report = await _data(engagement_id)
+    outcomes = {row["name"]: row for row in report["scan_runs"][0]["module_outcomes"]}
+    assert report["summary"]["incomplete_coverage"] is True
+    assert outcomes["passive_subdomains"]["status"] == "skipped"
+    assert outcomes["passive_subdomains"]["reason"] == "all passive sources disabled by configuration"
+    assert outcomes["git_secrets"]["coverage_metadata"]["excluded_path_policies"] == ["tests/**"]
+    html = render_html(report)
+    assert "Excluded repositories" in html and "tests/**" in html
 
 
 @pytest.mark.asyncio

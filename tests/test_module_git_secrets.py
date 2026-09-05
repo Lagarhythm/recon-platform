@@ -79,6 +79,19 @@ def test_resolves_in_osint_phase_after_github_org():
     assert order[-1] == "git_secrets"
 
 
+@pytest.mark.asyncio
+async def test_records_safe_exclusion_coverage_metadata(engagement_id):
+    prior = [{"subject_type": "repository", "subject_value": "https://github.com/Lagarhythm/recon-platform",
+              "raw_data": {"name": "Lagarhythm/recon-platform"}}]
+    async with module_harness(engagement_id, "git_secrets", prior_evidence=prior) as ctx:
+        repos = await GitSecretsModule()._collect_repos(ctx)
+        assert repos == []
+        assert ctx._module_run.coverage_metadata == {
+            "excluded_repositories": ["Lagarhythm/recon-platform"],
+            "excluded_path_policies": git_secrets._EXCLUDED_PATH_POLICIES,
+        }
+
+
 # --- pure helpers -------------------------------------------------------
 def test_scan_text_flags_specific_and_generic_but_never_leaks_raw():
     text = (

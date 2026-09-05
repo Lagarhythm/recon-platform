@@ -70,9 +70,11 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
     modules_by_run: dict[str, list[dict[str, Any]]] = {}
     for m in module_runs:
         outcome = "failed" if m.status.value == "failed" else (
-            "partial" if m.error_count else ("completed-empty" if m.status.value == "completed" and not m.evidence_count else m.status.value))
+            "partial" if m.error_count else ("completed-no-evidence" if m.status.value == "completed" and not m.evidence_count else m.status.value))
         modules_by_run.setdefault(m.scan_run_id, []).append({"name": m.module_name, "status": outcome,
-            "error_count": m.error_count, "evidence_count": m.evidence_count})
+            "reason": m.error if outcome == "skipped" else None,
+            "error_count": m.error_count, "evidence_count": m.evidence_count,
+            "coverage_metadata": m.coverage_metadata or {}})
     audit_total = (
         await session.execute(
             select(func.count()).select_from(AuditLogEntry).where(
@@ -101,6 +103,7 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
             "last_seen": _iso(a.last_seen),
             "evidence": [
                 {
+                    "id": e.id,
                     "module": e.source_module,
                     "subject_type": e.subject_type,
                     "polarity": e.polarity.value,
@@ -155,7 +158,7 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
             "scan_runs": len(runs),
             "audit_entries": audit_total,
             "out_of_scope_overrides": override_count,
-            "incomplete_coverage": any(m["status"] in ("failed", "partial") for ms in modules_by_run.values() for m in ms),
+            "incomplete_coverage": any(m["status"] in ("failed", "partial", "skipped") for ms in modules_by_run.values() for m in ms),
         },
         "findings": findings,
         "negative_findings": negative,
@@ -179,8 +182,8 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
                 "started_at": _iso(r.started_at),
                 "completed_at": _iso(r.completed_at),
                 "module_outcomes": modules_by_run.get(r.id, []),
-                "coverage_note": "Incomplete coverage: one or more modules failed or returned partial results."
-                    if any(m["status"] in ("failed", "partial") for m in modules_by_run.get(r.id, [])) else None,
+                "coverage_note": "Incomplete coverage: one or more modules failed, returned partial results, or were skipped; zero findings are not a clean result."
+                    if any(m["status"] in ("failed", "partial", "skipped") for m in modules_by_run.get(r.id, [])) else None,
             }
             for r in runs
         ],

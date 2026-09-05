@@ -22,7 +22,7 @@ from recon.core.roe import RoEConfig
 from recon.core.scope import ScopeManager
 from recon.models.artifact import Artifact
 from recon.models.engagement import Engagement
-from recon.models.enums import FindingPolarity, ModulePhase, ScopeStatus
+from recon.models.enums import FindingPolarity, ModulePhase, ModuleRunStatus, ScopeStatus
 from recon.models.evidence import Evidence
 from recon.models.scanrun import ScanModuleRun
 from recon.net.http_client import ReconHTTPClient
@@ -184,6 +184,19 @@ class ModuleContext:
         async with self._lock:
             self._session.add(ev)
             self._module_run.error_count += 1
+            await self._tick()
+
+    async def mark_skipped(self, reason: str) -> None:
+        """Persist an intentional no-coverage outcome for report consumers."""
+        async with self._lock:
+            self._module_run.status = ModuleRunStatus.SKIPPED
+            self._module_run.error = reason[:4000]
+            await self._tick()
+
+    async def set_coverage_metadata(self, metadata: dict[str, Any]) -> None:
+        """Attach sanitized coverage/exclusion metadata to this module run."""
+        async with self._lock:
+            self._module_run.coverage_metadata = dict(metadata)
             await self._tick()
 
     async def add_artifact(

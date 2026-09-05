@@ -50,12 +50,18 @@ class PassiveSubdomainsModule(ReconModule):
         }
         targets = sorted({*domains, *known})
         if not targets:
+            marker = getattr(ctx, "mark_skipped", None)
+            if marker:
+                await marker("no in-scope or seed domains available")
             await ctx.progress("passive_subdomains: no in-scope / seed domains in the RoE")
             return
 
         cfg = ctx.roe.recon.passive_sources
         sources = select_sources(set(cfg.disable), set(cfg.enable))
         if not sources:
+            marker = getattr(ctx, "mark_skipped", None)
+            if marker:
+                await marker("all passive sources disabled by configuration")
             await ctx.progress("passive_subdomains: every source disabled by config")
             return
 

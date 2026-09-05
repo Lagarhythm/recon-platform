@@ -316,12 +316,16 @@ class ScanService:
                 hard_timeout = timeout_s + max(15.0, 0.2 * timeout_s)
                 await asyncio.wait_for(mod.run(ctx), timeout=hard_timeout)
                 await ctx.flush()
-                module_run.status = ModuleRunStatus.COMPLETED
+                # Modules can persist an explicit skipped/no-target outcome.
+                # Do not overwrite it with COMPLETED: doing so falsely turns
+                # intentionally disabled coverage into a clean empty result.
+                if module_run.status is ModuleRunStatus.RUNNING:
+                    module_run.status = ModuleRunStatus.COMPLETED
                 module_run.completed_at = utcnow()
                 await session.commit()
                 await self._append_completed(scan_run_id, mod.name)
                 await event_bus.publish(
-                    scan_run_id, "module_completed", module=mod.name,
+                    scan_run_id, "module_skipped" if module_run.status is ModuleRunStatus.SKIPPED else "module_completed", module=mod.name,
                     evidence=module_run.evidence_count, errors=module_run.error_count,
                     duration=_duration(),
                 )

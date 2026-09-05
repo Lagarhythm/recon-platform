@@ -12,6 +12,7 @@ from recon.modules.osint._passive_sources import (
 )
 from recon.modules.osint.passive_subdomains import PassiveSubdomainsModule
 from recon.modules.registry import MODULES, load_builtin_modules, resolve_order
+from recon.models.enums import ModuleRunStatus
 from tests.harness import FakeHTTP, evidence_for, module_harness
 
 _D = "example.com"
@@ -90,6 +91,15 @@ def test_resolves_in_the_osint_phase():
     order = [m.name for m in resolve_order(["passive_subdomains"])]
     assert order[-1] == "passive_subdomains"
     assert MODULES["passive_subdomains"].phase.value == "osint"
+
+
+@pytest.mark.asyncio
+async def test_all_disabled_sources_persist_a_skipped_coverage_outcome(engagement_id):
+    async with module_harness(engagement_id, "passive_subdomains") as ctx:
+        ctx.roe.recon.passive_sources.disable = [source.name for source in ALL_SOURCES]
+        await PassiveSubdomainsModule().run(ctx)
+        assert ctx._module_run.status is ModuleRunStatus.SKIPPED
+        assert ctx._module_run.error == "all passive sources disabled by configuration"
 
 
 @pytest.mark.asyncio

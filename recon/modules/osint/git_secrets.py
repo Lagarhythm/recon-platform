@@ -98,6 +98,7 @@ _FIXTURE_PATH = re.compile(
     re.IGNORECASE,
 )
 _SELF_REPOS = {"lagarhythm/recon-platform"}
+_EXCLUDED_PATH_POLICIES = ["tests/**", "testdata/**", "fixtures/**", "__tests__/**", "*_test.*", "*.spec.*", "conftest.py"]
 
 
 def _mask(secret: str) -> str:
@@ -381,12 +382,20 @@ class GitSecretsModule(ReconModule):
     async def _collect_repos(self, ctx: ModuleContext) -> list[dict]:
         repos: list[dict] = []
         seen: set[str] = set()
+        excluded_repositories: list[str] = []
         for ev in await ctx.known_evidence("repository"):
             name = _repo_full_name(ev)
-            if not name or name.lower() in _SELF_REPOS or name in seen:
+            if not name or name in seen:
                 continue
             seen.add(name)
+            if name.lower() in _SELF_REPOS:
+                excluded_repositories.append(name)
+                continue
             repos.append({"name": name})
+        await ctx.set_coverage_metadata({
+            "excluded_repositories": sorted(excluded_repositories),
+            "excluded_path_policies": _EXCLUDED_PATH_POLICIES,
+        })
         return repos
 
     # --- per-repo ----------------------------------------------------
