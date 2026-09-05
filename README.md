@@ -45,17 +45,31 @@ OSINT modules contact public third-party sources only, never the target.
 | osint | `ct_org` | crt.sh by domain **and** by organisation name - domains + owner org |
 | osint | `rdap` | RDAP/WHOIS: registrant org, dates, status, NS + reverse-IP netblock |
 | osint | `github_org` | GitHub org: public repos (tech/topics/activity) + public members |
+| osint | `git_secrets` | full git-history secret scan of `github_org`-discovered repos (redacted, unverified by default) |
 | osint | `wayback` | Internet Archive: historical URLs, dead subdomains, removed documents |
+| osint | `passive_subdomains` | aggregates ~8 keyless passive sources (CT, passive-DNS, archives) with per-source confidence |
+| osint | `passive_urls` | historical URLs from Wayback, Common Crawl, OTX, urlscan |
+| osint | `cloud_assets` | public S3/GCS/Azure bucket existence + listability checks - never reads object contents |
 | osint | `search` | search-engine dorking via SearXNG / Google CSE - files, panels, staff, paste/cloud leaks |
 | passive | `dns` | dnspython - A/AAAA/CNAME/MX/NS/TXT/SOA/CAA, missing-DNSSEC |
 | passive | `ct_subdomains` | crt.sh Certificate Transparency logs |
+| passive | `subdomain_permute` | dnsgen/altdns-style permutations of known subdomains, wildcard-filtered |
+| passive | `subdomain_recurse` | re-queries passive sources against newly-found subdomains for deeper names |
+| passive | `subdomain_takeover` | dangling-CNAME detection against ~30 vendored provider fingerprints |
+| passive | `internetdb` | Shodan InternetDB - keyless open ports/CPEs/CVEs per resolved IP |
+| passive | `probe_http` | HTTP(S) liveness bridge: status, title, redirect, scheme - feeds crawler/js_analyzer/active phase |
 | passive | `http_analyzer` | headers, security headers (present + absent), cookies, TLS, tech |
+| passive | `email_security` | SPF/DMARC/DKIM/MTA-STS/TLS-RPT posture per apex domain |
+| passive | `tech_fingerprint` | vendored Wappalyzer-style corpus match on headers/cookies/HTML/JS |
 | passive | `crawler` | links, forms, params, JS files, robots.txt, sitemap.xml |
 | passive | `js_analyzer` | endpoints, params, leaked secrets (redacted), library fingerprints |
 | active | `port_scan` | **nmap** - TCP + `-sV`, rate-capped from the RoE |
 | active | `dir_fuzz` | **ffuf** - content discovery with soft-404 similarity filtering |
 | active | `dns_axfr` | zone-transfer attempts (a finding if one succeeds) |
 | active | `subdomain_brute` | wordlist brute-force with wildcard-DNS detection |
+| active | `exposure_checks` | curated unauthenticated presence checks (`.git`/`.env`/actuator/swagger/admin panels/backups/GraphQL introspection) |
+| active | `scan_diff` | CTEM delta vs. the last completed run's baseline snapshot |
+| active | `cve_correlate` | matches service/tech versions against InternetDB, the local CVE index, and OSV.dev |
 
 For **company OSINT**, an engagement's RoE carries an `osint:` block (company
 name + `seed_domains`); `scope:` may be omitted entirely for an OSINT-only
@@ -117,8 +131,8 @@ There is no password recovery - store it in a password manager.
 
 ## Architecture
 
-- **`recon/orchestrator/`** is the engine's internal API. The dashboard is a
-  thin client; a future CLI is just another client - no engine changes.
+- **`recon/orchestrator/`** is the engine's internal API. The dashboard and the
+  `recon` CLI are both thin clients over it - no engine changes either way.
 - **`recon/modules/`** - each module does one job through `ModuleContext`
   (`CONTRACT.md`). No module writes the DB or makes a raw request directly.
 - **`recon/net/http_client.py`** - the single audited, rate-limited,
