@@ -198,40 +198,40 @@ def _seed(conn: sqlite3.Connection) -> None:
 
 def _cidr_audit(conn, **overrides):
     """Insert a valid CIDR-path AddressAudit unless a field is overridden."""
-    row = dict(
-        id="aa_cidr",
-        manifest_id="m_a",
-        manifest_entry_id="e_a",
-        scan_run_id="run_a",
-        engagement_id="eng_a",
-        candidate_ip="10.0.0.5",
-        authorization_snapshot_id="snap_a",
-        authorized_cidr_id="c_a",
-        parent_authorized_cidr="10.0.0.0/24",
-        method_profile_id="cidr_syn_v1",
-        outcome="no_response",
-        idempotency_key="mh:10.0.0.5",
-        created_at=_TS,
-    )
+    row = {
+        "id": "aa_cidr",
+        "manifest_id": "m_a",
+        "manifest_entry_id": "e_a",
+        "scan_run_id": "run_a",
+        "engagement_id": "eng_a",
+        "candidate_ip": "10.0.0.5",
+        "authorization_snapshot_id": "snap_a",
+        "authorized_cidr_id": "c_a",
+        "parent_authorized_cidr": "10.0.0.0/24",
+        "method_profile_id": "cidr_syn_v1",
+        "outcome": "no_response",
+        "idempotency_key": "mh:10.0.0.5",
+        "created_at": _TS,
+    }
     row.update(overrides)
     _insert(conn, "address_audit", **row)
 
 
 def _d0_audit(conn, **overrides):
     """Insert a valid D0-path (hostname) AddressAudit unless a field is overridden."""
-    row = dict(
-        id="aa_d0",
-        scan_run_id="run_a",
-        engagement_id="eng_a",
-        candidate_ip="10.0.0.9",
-        authorization_snapshot_id="snap_a",
-        authorized_target_id="t_a",
-        source_hostname="host.example.com",
-        method_profile_id="dns_connect_bind_v1",
-        outcome="live",
-        idempotency_key="snap_a:t_a:10.0.0.9",
-        created_at=_TS,
-    )
+    row = {
+        "id": "aa_d0",
+        "scan_run_id": "run_a",
+        "engagement_id": "eng_a",
+        "candidate_ip": "10.0.0.9",
+        "authorization_snapshot_id": "snap_a",
+        "authorized_target_id": "t_a",
+        "source_hostname": "host.example.com",
+        "method_profile_id": "dns_connect_bind_v1",
+        "outcome": "live",
+        "idempotency_key": "snap_a:t_a:10.0.0.9",
+        "created_at": _TS,
+    }
     row.update(overrides)
     _insert(conn, "address_audit", **row)
 
@@ -500,12 +500,13 @@ def test_cidr_audit_requires_manifest_entry_id(db):
 # B2 round 2 - retention bundle survival FK
 # --------------------------------------------------------------------------- #
 def _export(conn, **overrides):
-    row = dict(
-        id="ex1", engagement_id="eng_a", exported_by_user_id="u1", exported_at=_TS,
-        reason="retention", bundle_artifact_id="ra1", bundle_artifact_sha256="deadbeef",
-        snapshot_count=1, manifest_count=1, address_audit_count=1, attestation_count=0,
-        manifest_hashes="[]", created_at=_TS,
-    )
+    row = {
+        "id": "ex1", "engagement_id": "eng_a", "exported_by_user_id": "u1",
+        "exported_at": _TS, "reason": "retention", "bundle_artifact_id": "ra1",
+        "bundle_artifact_sha256": "deadbeef", "snapshot_count": 1, "manifest_count": 1,
+        "address_audit_count": 1, "attestation_count": 0, "manifest_hashes": "[]",
+        "created_at": _TS,
+    }
     row.update(overrides)
     _insert(conn, "audit_retention_export", **row)
 

@@ -100,9 +100,35 @@ class EngagementService:
         db_user.active_engagement_id = engagement_id
 
     async def purge(self, session: AsyncSession, engagement_id: str) -> None:
-        """Hard-delete an engagement and everything scoped to it (FK cascade)."""
+        """Hard-delete an engagement and everything scoped to it (FK cascade).
+
+        Refuses if the engagement carries active-scan forensic evidence
+        (``AuthorizationSnapshot`` / manifest / audit / attestation rows): those
+        FKs are ``RESTRICT`` by design (P0-1 / B2). Use
+        ``recon.orchestrator.retention.purge_engagement`` - it exports a verified
+        retention bundle first.
+        """
+        from recon.orchestrator.retention import (
+            RetentionRequiredError,
+            engagement_has_active_scan_evidence,
+        )
+
+        await self.get(session, engagement_id)  # 404 if missing
+        if await engagement_has_active_scan_evidence(session, engagement_id):
+            raise RetentionRequiredError(
+                f"engagement {engagement_id} has active-scan audit evidence; "
+                "purge it through the retention workflow (retention.purge_engagement)"
+            )
+        await self._delete_engagement_row(session, engagement_id)
+
+    async def _delete_engagement_row(
+        self, session: AsyncSession, engagement_id: str
+    ) -> None:
+        """Detach operator active-engagement pointers and delete the engagement
+        row (remaining non-forensic children cascade at the DB level). No
+        forensic-evidence guard - only ``purge`` and the retention workflow,
+        which has already exported the bundle, call this."""
         engagement = await self.get(session, engagement_id)
-        # Detach it from any operator's active pointer first.
         for u in (
             await session.execute(
                 select(User).where(User.active_engagement_id == engagement_id)

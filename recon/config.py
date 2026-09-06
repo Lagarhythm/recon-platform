@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     artifacts_dir: Path = _PROJECT_ROOT / "data" / "artifacts"
     artifact_soft_cap_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB per engagement
 
+    # Retention bundles (P0-1 / B2). A sibling of `artifacts_dir`, deliberately
+    # NOT under any `artifacts_dir/<engagement_id>/`, so an engagement purge and
+    # the `Artifact` CASCADE never reach a retained audit bundle. Content is
+    # addressed by SHA-256 with no per-engagement dimension.
+    retention_dir: Path = _PROJECT_ROOT / "data" / "retention"
+
     # --- Auth / sessions ----------------------------------------------
     session_idle_timeout_minutes: int = 60
     session_cookie_name: str = "recon_session"
@@ -105,6 +111,7 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "reports").mkdir(exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.retention_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache
