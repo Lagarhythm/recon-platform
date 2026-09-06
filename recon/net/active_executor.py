@@ -30,7 +30,8 @@ from datetime import UTC, datetime
 
 from recon.core.active_policy import active_policy
 from recon.core.netscope import NetscopeError, canonical_ip
-from recon.net.external import CommandResult, run_command
+from recon.net import external
+from recon.net.external import CommandResult
 from recon.net.permit import ActiveTargetPermit, PermitError, is_genuine_permit
 
 # Literal token in ``effective_argv_shape`` that the executor replaces with the
@@ -69,12 +70,14 @@ class ActiveExecutor:
         kill_switch,
         is_cancelled: Callable[[], bool | Awaitable[bool]],
         predispatch_check: Callable[[ActiveTargetPermit], Awaitable[None]],
-        command_runner: CommandRunner = run_command,
+        command_runner: CommandRunner | None = None,
     ) -> None:
         self._rate_limiter = rate_limiter
         self._kill_switch = kill_switch
         self._is_cancelled = is_cancelled
         self._predispatch_check = predispatch_check
+        #: ``None`` -> resolve ``recon.net.external.run_command`` at call time
+        #: (so a test monkeypatching that name is honoured).
         self._command_runner = command_runner
         self._consumed_nonces: set[str] = set()
 
@@ -213,9 +216,8 @@ class ActiveExecutor:
         self, permit: ActiveTargetPermit, policy, started: datetime
     ) -> ProbeResult:
         argv = self._build_argv(permit)
-        result = await self._command_runner(
-            argv, timeout=policy.probe_timeout_seconds
-        )
+        runner = self._command_runner or external.run_command
+        result = await runner(argv, timeout=policy.subprocess_timeout_seconds)
         outcome = "completed" if not result.timed_out else "timeout"
         return ProbeResult(
             permit_id=permit.permit_id,

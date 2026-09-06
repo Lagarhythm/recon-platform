@@ -255,6 +255,13 @@ class ScanService:
                     await self._await_checkpoint(scan_run_id)
                     return
 
+                # P0-1: the first active module in a confirmed run triggers the
+                # AuthorizationSnapshot + D0 connect-time liveness binding, once.
+                if mod.phase is ModulePhase.ACTIVE:
+                    await self._ensure_active_authorization(
+                        scan_run_id, roe, scope, rate_limiter
+                    )
+
                 try:
                     await self._run_one_module(
                         scan_run_id, mod, roe, scope, http, engagement_id, allow_oos,
@@ -375,6 +382,70 @@ class ScanService:
                 )
             finally:
                 http.audit_context = None
+
+    async def _ensure_active_authorization(
+        self, scan_run_id: str, roe: RoEConfig, scope: ScopeManager,
+        rate_limiter: RateLimiter,
+    ) -> None:
+        """Create the run's AuthorizationSnapshot and run D0 connect-bind, once.
+        A resumed run whose snapshot already exists is a no-op."""
+        from sqlalchemy import func
+
+        from recon.models.authz import AddressAudit, LivenessAttestation
+        from recon.orchestrator.authorization import (
+            create_active_snapshot,
+            get_active_snapshot,
+        )
+        from recon.orchestrator.d0 import run_d0_connect_bind
+
+        # D0 authorizes EXACT in-scope hostnames only (no domain-apex implicit
+        # authorization - Security B1). CIDR discovery profiles are disabled.
+        # With neither, there is no active-scan surface to snapshot; port_scan
+        # keeps its legacy same-run target path (F6 - the domain-scoped-RoE
+        # port-scan authorization question is a product decision for Security).
+        if not roe.scope.in_scope.hosts:
+            return
+
+        async with session_scope() as session:
+            run = await session.get(ScanRun, scan_run_id)
+            if run is None or not run.active_confirmed:
+                return
+            snapshot = await get_active_snapshot(session, scan_run_id)
+            if snapshot is not None:
+                already = (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AddressAudit)
+                        .where(AddressAudit.scan_run_id == scan_run_id)
+                    )
+                ).scalar_one() + (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(LivenessAttestation)
+                        .where(LivenessAttestation.scan_run_id == scan_run_id)
+                    )
+                ).scalar_one()
+                if already:
+                    return  # D0 already ran (resume)
+            else:
+                snapshot = await create_active_snapshot(session, run, roe)
+            # The snapshot must be durable before any probe: the executor's
+            # dispatch-time recheck reloads it on a fresh session.
+            await session.commit()
+            d0 = await run_d0_connect_bind(
+                session,
+                run=run,
+                snapshot=snapshot,
+                scope=scope,
+                rate_limiter=rate_limiter,
+                is_cancelled=lambda: self._is_cancelled(scan_run_id),
+            )
+        await event_bus.publish(
+            scan_run_id, "d0_completed",
+            attestations=len(d0.attestation_ids),
+            audits=len(d0.audit_ids),
+            hostnames=d0.hostnames_considered,
+        )
 
     # --- state helpers ----------------------------------------
     async def _active_ok(self, scan_run_id: str) -> bool:

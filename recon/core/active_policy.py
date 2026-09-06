@@ -35,6 +35,10 @@ class ActiveScanPolicy:
     probe_timeout_seconds: float
     max_retries: int
     total_time_budget_seconds: float
+    #: wall-clock ceiling for a permit whose operation shells out (port_scan ->
+    #: nmap). The connect-time bind uses ``probe_timeout_seconds``; a full
+    #: service sweep needs minutes, not the 2s D0 connect budget.
+    subprocess_timeout_seconds: float = 300.0
     min_ipv4_prefix: int = 24
     min_ipv6_prefix: int = 120
     reject_overlapping_cidrs: bool = True
