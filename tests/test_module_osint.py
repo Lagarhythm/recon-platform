@@ -238,10 +238,15 @@ def _searx(results) -> httpx.Response:
 
 @pytest.mark.asyncio
 async def test_search_noops_without_a_backend(engagement_id, monkeypatch):
+    from recon.models.enums import ModuleRunStatus, SkipReason
+
     monkeypatch.setattr("recon.modules.osint.search.search_backend", lambda: None)
     async with module_harness(engagement_id, "search", http=FakeHTTP({})) as ctx:
         ctx.roe.osint.company = "Acme"
         await SearchDorkModule().run(ctx)
+        # No backend => explicit skipped/not-configured, not a clean empty run.
+        assert ctx._module_run.status is ModuleRunStatus.SKIPPED
+        assert ctx._module_run.skip_reason is SkipReason.NOT_CONFIGURED
     assert await evidence_for(engagement_id) == []
 
 

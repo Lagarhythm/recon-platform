@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
-from recon.models.enums import ModulePhase
+from recon.models.enums import ModulePhase, SkipReason
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.osint._common import interesting_path, org_targets
 from recon.modules.osint._search import run_query, search_backend, verify_operators_honoured
@@ -260,6 +260,11 @@ class SearchDorkModule(ReconModule):
                 "search: no backend configured - set RECON_SEARCH_BACKEND + "
                 "RECON_SEARXNG_URL (or the Google CSE key/id)"
             )
+            # Not a clean empty result: the module never ran because it has no
+            # backend. Record it as an explicit skipped/not-configured state so
+            # the report does not read zero search hits as a clean search
+            # (P1 assessment, tuning item 2).
+            await ctx.mark_no_input(SkipReason.NOT_CONFIGURED)
             return
 
         company, domains = org_targets(ctx)
