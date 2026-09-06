@@ -7,11 +7,14 @@ import happens.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="recon-test-"))
+atexit.register(shutil.rmtree, _TMP, ignore_errors=True)
 os.environ.setdefault("RECON_SECRET_KEY", "test-secret-key-do-not-use-in-prod")
 os.environ["RECON_DATA_DIR"] = str(_TMP)
 os.environ["RECON_DATABASE_URL"] = f"sqlite+aiosqlite:///{(_TMP / 'test.db').as_posix()}"
