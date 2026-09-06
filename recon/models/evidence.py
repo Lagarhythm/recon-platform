@@ -35,6 +35,11 @@ class Evidence(UUIDPk, Base):
     scan_run_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("scan_run.id", ondelete="SET NULL"), nullable=True
     )
+    # Optional back-link to the liveness attestation this evidence proves (P0-1).
+    # Not forensic authority - the attestation row is - so this is a plain
+    # nullable column, no DB FK (avoids a full SQLite rebuild of `evidence`; the
+    # forensic direction address_audit -> liveness_attestation keeps its FK).
+    liveness_attestation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     # What this evidence is about, before correlation resolves it to an Asset.
     subject_type: Mapped[str] = mapped_column(String(16), nullable=False)

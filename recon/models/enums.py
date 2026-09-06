@@ -153,6 +153,22 @@ class SkipReason(str, enum.Enum):
     UNVERIFIED_TARGETS = "unverified_targets"
 
 
+class AddressOutcome(str, enum.Enum):
+    """The single terminal disposition of one candidate address in an active
+    discovery / connect-bind run (Security P0-1 gate §6 - one row per address).
+
+    Not exactly-once across a crash: the guarantee is one *terminal* row per
+    manifest address, reconciled on resume/cancel, never re-probed.
+    """
+
+    LIVE = "live"
+    NO_RESPONSE = "no_response"
+    EXCLUDED = "excluded"
+    RATE_LIMITED = "rate_limited"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+
+
 class WindowStatus(str, enum.Enum):
     NO_WINDOW = "no_window"
     WITHIN = "within"
