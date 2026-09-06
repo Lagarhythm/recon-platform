@@ -38,6 +38,7 @@ from recon.core.active_policy import BOOTSTRAP_POLICY
 from recon.core.netscope import NetscopeError, canonical_cidr
 from recon.core.roe import RoEConfig
 from recon.models.authz import (
+    CIDR_ADDRESS_COUNT_CEILING,
     AuthorizationSnapshot,
     AuthorizedCidr,
     AuthorizedTarget,
@@ -215,8 +216,10 @@ async def create_active_snapshot(
                 cidr=cidr,
                 ip_version=net.version,
                 # informational only in G2 (membership check does not expand);
-                # clamp so a wide IPv6 grant cannot overflow a 64-bit column.
-                address_count=min(net.num_addresses, 2**63 - 1),
+                # clamp so a wide IPv6 grant cannot overflow a 64-bit column. A
+                # clamped value is a lower bound - see AuthorizedCidr
+                # .address_count_saturated (Security P0-1 re-review ruling).
+                address_count=min(net.num_addresses, CIDR_ADDRESS_COUNT_CEILING),
                 source="roe_cidr",
             )
         )

@@ -13,7 +13,9 @@ from recon.core.roe import RoEConfig
 from recon.core.scope import ScopeManager
 from recon.db import session_scope
 from recon.models.authz import (
+    CIDR_ADDRESS_COUNT_CEILING,
     AddressAudit,
+    AuthorizedCidr,
     AuthorizedTarget,
     LivenessAttestation,
 )
@@ -27,6 +29,7 @@ from recon.net.permit import PermitError
 from recon.orchestrator.authorization import create_active_snapshot
 from recon.orchestrator.d0 import run_d0_connect_bind
 from recon.orchestrator.engagements import EngagementService
+from recon.orchestrator.retention import _bundle_dict
 
 pytestmark = pytest.mark.asyncio
 
@@ -143,6 +146,55 @@ async def _drive(engagement_id, *, answers, executor):
         )
         run_id = run.id
     return run_id, result
+
+
+_WIDE_IPV6_ROE = """
+engagement:
+  name: "Wide IPv6"
+  client: "self"
+  authorized_window: {start: "2026-01-01T00:00:00Z", end: "2030-01-01T00:00:00Z"}
+scope:
+  in_scope:
+    hosts: ["app.example.com"]
+    cidrs: ["203.0.113.0/24", "2001:db8::/32"]
+rate_limits: {max_requests_per_second: 10, max_concurrent_connections: 20}
+evasion: {user_agents: ["UA-1"]}
+llm: {analysis_enabled: false}
+"""
+
+
+async def test_wide_ipv6_cidr_address_count_is_clamped_and_flagged_saturated():
+    """A grant wider than 2**63-1 (any IPv6 prefix shorter than /65) is stored
+    clamped; the row must report it as a lower bound, not an exact count
+    (Security P0-1 re-review design ruling)."""
+    async with session_scope() as session:
+        eng, _ = await EngagementService().create(session, _WIDE_IPV6_ROE)
+        run = await _seed_run(session, eng.id)
+        roe = RoEConfig.model_validate(eng.roe_config)
+        snap = await create_active_snapshot(session, run, roe)
+        cidrs = {
+            c.cidr: c
+            for c in (
+                await session.execute(
+                    select(AuthorizedCidr).where(AuthorizedCidr.snapshot_id == snap.id)
+                )
+            ).scalars()
+        }
+
+    v4 = cidrs["203.0.113.0/24"]
+    assert v4.address_count == 256
+    assert v4.address_count_saturated is False
+
+    v6 = cidrs["2001:db8::/32"]
+    assert v6.address_count == CIDR_ADDRESS_COUNT_CEILING
+    assert v6.address_count_saturated is True
+
+    bundle = _bundle_dict(
+        "engagement", reason="test", actor_user_id="operator",
+        snapshots=[], cidrs=[v6], targets=[], amendments=[], manifests=[],
+        entries=[], audits=[], attestations=[],
+    )
+    assert bundle["authorized_cidrs"][0]["address_count"] == f">={CIDR_ADDRESS_COUNT_CEILING}"
 
 
 async def test_snapshot_creates_one_authorized_target_per_exact_host(_engagement_id):

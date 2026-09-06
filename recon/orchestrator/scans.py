@@ -46,6 +46,33 @@ _OSINT_MODULE_TIMEOUT = 12 * 60
 _PASSIVE_MODULE_TIMEOUT = 15 * 60
 _ACTIVE_MODULE_TIMEOUT = 60 * 60
 
+# Central fail-closed active-scan surface (Security P0-1 gate re-review, S1b).
+#
+# The only sanctioned active-traffic path this release is the D0 connect-bind
+# liveness driver invoked from ``_ensure_active_authorization``. Every registered
+# phase=ACTIVE *module* is gated centrally, before any of its code runs:
+#
+#   * ``_ACTIVE_SURFACE_ALLOWLIST`` - local-only modules (no network egress) that
+#     may run *once a valid AuthorizationSnapshot exists* for the run.
+#   * ``_ACTIVE_SURFACE_NETWORK_DENIED`` - modules that emit target traffic
+#     (DNS / AXFR / HTTP / subprocess) with no permit-bound, separately-reviewed
+#     method profile yet. Always skipped, snapshot or not. Each returns only with
+#     its own reviewed profile (``port_scan`` -> Task 0P).
+#
+# The runtime gate trusts only the allowlist - anything not on it is skipped, so
+# an ACTIVE module registered later is disabled by default. The denied set exists
+# so ``test_every_active_module_is_classified`` fails loudly when a new ACTIVE
+# module is registered without a classification decision.
+_ACTIVE_SURFACE_ALLOWLIST: frozenset[str] = frozenset({"scan_diff"})
+_ACTIVE_SURFACE_NETWORK_DENIED: frozenset[str] = frozenset({
+    "port_scan",
+    "subdomain_brute",
+    "dns_axfr",
+    "exposure_checks",
+    "dir_fuzz",
+    "cve_correlate",
+})
+
 
 def _module_timeout(mod: ReconModule) -> float:
     if mod.max_runtime_seconds is not None:
@@ -238,14 +265,14 @@ class ScanService:
                     # the checkpoint), leave its COMPLETED/FAILED row and its
                     # real duration alone - only a module carried over from an
                     # earlier scan run is genuinely "skipped".
-                    was_skipped = await self._skip_if_pending(scan_run_id, mod.name)
-                    if was_skipped:
+                    skipped_reason = await self._skip_if_pending(scan_run_id, mod.name)
+                    if skipped_reason is not None:
                         # Carry the sub-reason on the event too, so the live UI
                         # renders "skipped (resumed_prior_run)" consistently with
                         # the module_completed/module_skipped path below.
                         await event_bus.publish(
                             scan_run_id, "module_skipped", module=mod.name,
-                            skip_reason=SkipReason.RESUMED_PRIOR_RUN.value,
+                            skip_reason=skipped_reason.value,
                         )
                     continue
 
@@ -261,6 +288,13 @@ class ScanService:
                     await self._ensure_active_authorization(
                         scan_run_id, roe, scope, rate_limiter
                     )
+                    skip = await self._active_surface_skip(scan_run_id, mod)
+                    if skip is not None:
+                        await self._skip_active_surface_module(
+                            scan_run_id, mod, skip
+                        )
+                        completed.add(mod.name)
+                        continue
 
                 try:
                     await self._run_one_module(
@@ -383,6 +417,65 @@ class ScanService:
             finally:
                 http.audit_context = None
 
+    async def _active_surface_skip(
+        self, scan_run_id: str, mod: ReconModule
+    ) -> SkipReason | None:
+        """Central fail-closed gate for phase=ACTIVE modules.
+
+        The only sanctioned active-traffic path this release is the D0
+        connect-bind liveness driver run from ``_ensure_active_authorization``.
+        Every registered ACTIVE module would otherwise emit DNS / AXFR / HTTP /
+        subprocess traffic with no authorization snapshot, opaque permit,
+        pre-dispatch revocation check, or D0 IP-membership check - the same
+        failure class as the removed raw-nmap branch (Security P0-1 re-review,
+        S1b). Returns the ``SkipReason`` to record, or ``None`` to let the
+        module run.
+
+        Two layers, both fail closed:
+          1. deny-select - a module not on ``_ACTIVE_SURFACE_ALLOWLIST`` never
+             runs, regardless of snapshot state (this release the allowlist is
+             the local-only ``scan_diff``; every network-capable ACTIVE module
+             is off it);
+          2. even an allowlisted module needs a durable AuthorizationSnapshot -
+             a domain-only RoE that took the no-exact-host early return has
+             none, so nothing active runs.
+        """
+        if mod.phase is not ModulePhase.ACTIVE:
+            return None
+        if mod.name not in _ACTIVE_SURFACE_ALLOWLIST:
+            return SkipReason.ACTIVE_SURFACE_DISABLED
+        from recon.orchestrator.authorization import get_active_snapshot
+
+        async with session_scope() as session:
+            if await get_active_snapshot(session, scan_run_id) is None:
+                return SkipReason.UNVERIFIED_TARGETS
+        return None
+
+    async def _skip_active_surface_module(
+        self, scan_run_id: str, mod: ReconModule, reason: SkipReason
+    ) -> None:
+        """Record a centrally-enforced terminal skip for an ACTIVE module. No
+        module code runs, so no egress is possible."""
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    select(ScanModuleRun).where(
+                        ScanModuleRun.scan_run_id == scan_run_id,
+                        ScanModuleRun.module_name == mod.name,
+                    )
+                )
+            ).scalar_one()
+            row.status = ModuleRunStatus.SKIPPED
+            row.skip_reason = reason
+            row.started_at = row.started_at or utcnow()
+            row.completed_at = utcnow()
+            row.error = f"no approved active-scan method for this release: {reason.value}"
+        await self._append_completed(scan_run_id, mod.name)
+        await event_bus.publish(
+            scan_run_id, "module_skipped", module=mod.name,
+            phase=mod.phase.value, skip_reason=reason.value,
+        )
+
     async def _ensure_active_authorization(
         self, scan_run_id: str, roe: RoEConfig, scope: ScopeManager,
         rate_limiter: RateLimiter,
@@ -401,10 +494,11 @@ class ScanService:
         # D0 authorizes EXACT in-scope hostnames only (no domain-apex implicit
         # authorization - Security B1). CIDR discovery profiles are disabled.
         # With no exact in-scope host there is no active-scan surface to
-        # snapshot and D0 does not run. This is safe only because every enabled
-        # G2 active consumer fails closed without a snapshot: port_scan is out
-        # of the G2 surface and records SKIPPED/unverified_targets regardless
-        # (Security G2 re-review, S1/S2).
+        # snapshot and D0 does not run. This is safe because the orchestrator's
+        # central active-surface gate (``_active_surface_skip``) then skips
+        # every phase=ACTIVE module - with or without a snapshot - so no module
+        # code runs and nothing active leaves the process (Security P0-1
+        # re-review, S1/S2/S1b).
         if not roe.scope.in_scope.hosts:
             return
 
@@ -528,9 +622,16 @@ class ScanService:
                     row.completed_at = utcnow()
                     row.error = error
 
-    async def _skip_if_pending(self, scan_run_id: str, module_name: str) -> bool:
-        """Mark a module SKIPPED only if it hasn't already run. Returns whether
-        it was actually skipped (vs. left COMPLETED/FAILED from this run)."""
+    async def _skip_if_pending(
+        self, scan_run_id: str, module_name: str
+    ) -> SkipReason | None:
+        """Mark a carried-over module SKIPPED/``resumed_prior_run`` and return
+        that reason, or ``None`` to leave the row as-is.
+
+        ``None`` covers both a COMPLETED/FAILED row from this run and a row that
+        already carries a terminal skip reason (e.g. an active-surface module
+        the orchestrator centrally disabled) - re-labelling that as a benign
+        resume would hide a real coverage gap on every resumed run."""
         async with session_scope() as session:
             row = (
                 await session.execute(
@@ -541,13 +642,15 @@ class ScanService:
                 )
             ).scalar_one()
             if row.status in (ModuleRunStatus.COMPLETED, ModuleRunStatus.FAILED):
-                return False
+                return None
+            if row.status is ModuleRunStatus.SKIPPED and row.skip_reason is not None:
+                return None
             row.status = ModuleRunStatus.SKIPPED
             # A benign carry-over from an earlier scan run - explicitly distinct
             # from a "module had no input" SKIPPED so the release gate can tell
             # them apart.
             row.skip_reason = SkipReason.RESUMED_PRIOR_RUN
-            return True
+            return SkipReason.RESUMED_PRIOR_RUN
 
     async def _append_completed(self, scan_run_id: str, module_name: str) -> None:
         async with session_scope() as session:

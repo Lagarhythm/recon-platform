@@ -1,8 +1,11 @@
 """D0 end to end through ScanService: one `dns,port_scan` invocation, the
 passive dns answer becomes a permit-gated connect-bind attestation bound to a
-checkpoint-acknowledged CIDR, and ``port_scan`` - which is out of the G2 active
-surface (Security G2 re-review, S2) - records a clean ``SKIPPED /
-unverified_targets`` and issues **no** nmap call (P0-1 acceptance)."""
+checkpoint-acknowledged CIDR, and ``port_scan`` - which the central active-
+surface gate skips (Security P0-1 re-review, S1b) - records a clean ``SKIPPED /
+active_surface_disabled`` and issues **no** nmap call (P0-1 acceptance).
+
+Per-module coverage of the S1b gate across every network-capable ACTIVE module
+lives in ``tests/test_active_surface_gate.py``."""
 
 from __future__ import annotations
 
@@ -215,7 +218,9 @@ async def test_d0_full_chain_one_invocation(_fakes):
     assert att.authorization_snapshot_id == snap.id
     assert [a.outcome for a in audits] == [AddressOutcome.LIVE]
     assert mruns["port_scan"].status is ModuleRunStatus.SKIPPED
-    assert mruns["port_scan"].skip_reason is SkipReason.UNVERIFIED_TARGETS
+    # port_scan is centrally skipped by the active-surface gate (S1b): it is a
+    # non-D0 network-capable ACTIVE module with no permit-bound profile.
+    assert mruns["port_scan"].skip_reason is SkipReason.ACTIVE_SURFACE_DISABLED
 
 
 _DOMAIN_ONLY_ROE = """
@@ -235,7 +240,7 @@ llm: {analysis_enabled: false}
 async def test_domain_only_roe_no_egress(_fakes):
     """S1: a domain-only RoE (no exact hosts, no CIDR) never creates an
     authorization snapshot, never promotes a passive-evidence target, and
-    port_scan fails closed to SKIPPED/unverified_targets with zero egress."""
+    port_scan fails closed to SKIPPED/active_surface_disabled with zero egress."""
     async with session_scope() as session:
         session.add(User(username="operator", password_hash="x"))
         eng, _ = await EngagementService().create(session, _DOMAIN_ONLY_ROE)
@@ -262,7 +267,9 @@ async def test_domain_only_roe_no_egress(_fakes):
     assert _fakes.nmap_calls == []
     assert _fakes.connects == []
     assert mruns["port_scan"].status is ModuleRunStatus.SKIPPED
-    assert mruns["port_scan"].skip_reason is SkipReason.UNVERIFIED_TARGETS
+    # port_scan is centrally skipped by the active-surface gate (S1b): it is a
+    # non-D0 network-capable ACTIVE module with no permit-bound profile.
+    assert mruns["port_scan"].skip_reason is SkipReason.ACTIVE_SURFACE_DISABLED
 
 
 async def test_poisoned_exact_host_dns_no_egress(_fakes):
@@ -298,7 +305,9 @@ async def test_poisoned_exact_host_dns_no_egress(_fakes):
     assert _fakes.nmap_calls == []
     assert all(a.outcome is not AddressOutcome.LIVE for a in audits)
     assert mruns["port_scan"].status is ModuleRunStatus.SKIPPED
-    assert mruns["port_scan"].skip_reason is SkipReason.UNVERIFIED_TARGETS
+    # port_scan is centrally skipped by the active-surface gate (S1b): it is a
+    # non-D0 network-capable ACTIVE module with no permit-bound profile.
+    assert mruns["port_scan"].skip_reason is SkipReason.ACTIVE_SURFACE_DISABLED
 
 
 async def _done(run_id) -> bool:

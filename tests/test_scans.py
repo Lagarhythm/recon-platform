@@ -168,7 +168,26 @@ async def test_passive_first_checkpoint_blocks_active(engagement_id):
     async with session_scope() as s:
         await scan_service.resume_scan(s, run_id)
     await wait_for(lambda: _is(run_id, ScanRunStatus.COMPLETED))
-    assert "active.example.com" in await _asset_values(engagement_id)
+    # Post-S1b: a resumed run drains the active phase, but an ACTIVE module with
+    # no permit-bound method profile is centrally skipped by the active-surface
+    # gate - it never runs, so it produces no evidence/assets. Execution of an
+    # allowlisted active module after resume is covered in
+    # tests/test_active_surface_gate.py and tests/test_d0_e2e.py.
+    from recon.models.enums import SkipReason
+
+    rows = await _module_statuses(run_id)
+    assert rows["fake_act"] is ModuleRunStatus.SKIPPED
+    async with session_scope() as s:
+        fa = (
+            await s.execute(
+                select(ScanModuleRun).where(
+                    ScanModuleRun.scan_run_id == run_id,
+                    ScanModuleRun.module_name == "fake_act",
+                )
+            )
+        ).scalar_one()
+    assert fa.skip_reason is SkipReason.ACTIVE_SURFACE_DISABLED
+    assert "active.example.com" not in await _asset_values(engagement_id)
 
 
 @pytest.mark.asyncio

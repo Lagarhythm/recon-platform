@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from recon.artifacts.retention_store import RetentionArtifactError, RetentionArtifactStore
 from recon.models.authz import (
+    CIDR_ADDRESS_COUNT_CEILING,
     AddressAudit,
     AuditRetentionExport,
     AuthorizationAmendment,
@@ -139,7 +140,14 @@ def _bundle_dict(
                     "snapshot_id": c.snapshot_id,
                     "cidr": c.cidr,
                     "ip_version": c.ip_version,
-                    "address_count": c.address_count,
+                    # A clamped count is a lower bound, not exact. Emit the
+                    # bound in the retention artifact itself so a consumer
+                    # cannot render the saturated storage value as exact.
+                    "address_count": (
+                        f">={CIDR_ADDRESS_COUNT_CEILING}"
+                        if c.address_count_saturated else c.address_count
+                    ),
+                    "address_count_saturated": c.address_count_saturated,
                     "source": c.source,
                     "amendment_id": c.amendment_id,
                 }

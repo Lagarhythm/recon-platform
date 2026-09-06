@@ -151,6 +151,12 @@ class SkipReason(str, enum.Enum):
     #: the in-scope target set was non-empty but no target had attested
     #: liveness, so no active scan ran (Security P0-1 gate §3)
     UNVERIFIED_TARGETS = "unverified_targets"
+    #: the module performs active target traffic that has no approved,
+    #: permit-bound method profile in this release, so the orchestrator skips
+    #: it centrally before any of its code runs (Security P0-1 gate §5;
+    #: the only sanctioned active path this release is the D0 connect-bind
+    #: liveness driver)
+    ACTIVE_SURFACE_DISABLED = "active_surface_disabled"
 
 
 class AddressOutcome(str, enum.Enum):

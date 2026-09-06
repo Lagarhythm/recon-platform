@@ -47,6 +47,14 @@ from recon.models.enums import AddressOutcome, enum_col
 # method_profile_id of the only active method approved for P0-1 (Security gate).
 DNS_CONNECT_BIND_V1 = "dns_connect_bind_v1"
 
+# ``AuthorizedCidr.address_count`` is a signed-64-bit column and is informational
+# only in G2 (the membership check never expands a CIDR). A grant wider than this
+# - any IPv6 prefix shorter than /65 - is stored clamped to the ceiling. A value
+# equal to the ceiling therefore means "at least this many", never an exact
+# count; consumers must render it as saturated (``>= 2**63-1``) and must not use
+# it for aggregate enforcement (Security P0-1 re-review, design ruling).
+CIDR_ADDRESS_COUNT_CEILING = 2**63 - 1
+
 
 class AuthorizationSnapshot(UUIDPk, Base):
     """Immutable record of exactly what active scanning was authorized for one
@@ -150,6 +158,12 @@ class AuthorizedCidr(UUIDPk, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTimeUTC, default=utcnow, nullable=False
     )
+
+    @property
+    def address_count_saturated(self) -> bool:
+        """``address_count`` hit the storage ceiling and is a lower bound, not an
+        exact count. Renderers must show ``>= 2**63-1`` rather than the number."""
+        return self.address_count >= CIDR_ADDRESS_COUNT_CEILING
 
 
 class AuthorizedTarget(UUIDPk, Base):

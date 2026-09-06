@@ -31,6 +31,7 @@ _SKIP_LABELS = {
     "missing_binary": "skipped - required tool not installed",
     "capability_unavailable": "skipped - required capability/privilege unavailable",
     "unverified_targets": "skipped - in-scope targets had no verified liveness",
+    "active_surface_disabled": "skipped - no approved active-scan method for this module in this release",
 }
 
 

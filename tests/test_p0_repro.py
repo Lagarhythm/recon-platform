@@ -96,6 +96,45 @@ def _register_fakes():
 
 
 @pytest.fixture(autouse=True)
+def _allow_repro_active(monkeypatch):
+    """``repro_active`` stands in for a permit-bound active module: put it on the
+    active-surface allowlist so the S1b gate lets it run once a snapshot exists.
+    The P0-2 handoff being tested is orthogonal to the gate."""
+    from recon.orchestrator import scans
+
+    monkeypatch.setattr(
+        scans,
+        "_ACTIVE_SURFACE_ALLOWLIST",
+        scans._ACTIVE_SURFACE_ALLOWLIST | {"repro_active"},
+    )
+
+
+# An RoE with an exact in-scope host (so the active checkpoint materialises an
+# AuthorizationSnapshot) plus the CIDR that the repro A-record lands in. The
+# seed host itself resolves to nothing this run, so D0 makes no connect.
+_SEED_HOST_ROE = """
+engagement:
+  name: "Seed host"
+  client: "self"
+  authorized_window:
+    start: "2026-01-01T00:00:00Z"
+    end: "2030-01-01T00:00:00Z"
+scope:
+  in_scope:
+    domains: ["example.com", "*.example.com"]
+    hosts: ["seed.example.com"]
+    cidrs: ["203.0.113.0/24"]
+rate_limits:
+  max_requests_per_second: 10
+  max_concurrent_connections: 20
+evasion:
+  user_agents: ["UA-1"]
+llm:
+  analysis_enabled: false
+"""
+
+
+@pytest.fixture(autouse=True)
 async def _cleanup_scans():
     yield
     kill_switch.reset()
@@ -126,7 +165,12 @@ llm:
 
 
 async def _make_engagement(roe_yaml: str) -> str:
+    from recon.models.user import User
+
     async with session_scope() as session:
+        # the active-checkpoint actor model needs exactly one user to resolve
+        if (await session.execute(select(User))).scalars().first() is None:
+            session.add(User(username="operator", password_hash="x"))
         eng, _ = await EngagementService().create(session, roe_yaml)
         return eng.id
 
@@ -166,9 +210,10 @@ async def _module_rows(run_id: str) -> dict[str, ScanModuleRun]:
 # now visible to the dependent active module through ctx.resolve_targets without
 # waiting for end-of-run correlation.
 @pytest.mark.asyncio
-async def test_p0_2_same_run_dependency_handoff(engagement_id):
+async def test_p0_2_same_run_dependency_handoff():
     """`repro_dns,repro_active` in ONE pre-authorised run: the active module must
     receive the name `repro_dns` resolved this run."""
+    engagement_id = await _make_engagement(_SEED_HOST_ROE)
     run_id = await _start(
         engagement_id, ["repro_dns", "repro_active"], preauthorize_active=True
     )
@@ -194,10 +239,11 @@ async def test_p0_2_same_run_dependency_handoff(engagement_id):
 
 
 @pytest.mark.asyncio
-async def test_p0_2_same_run_handoff_manual_checkpoint(engagement_id):
+async def test_p0_2_same_run_handoff_manual_checkpoint():
     """The manual checkpoint flow (operator resumes at the passive->active
     pause) must also hand the dependency's same-run output to the active
     module - it worked before only because the pause happened to correlate."""
+    engagement_id = await _make_engagement(_SEED_HOST_ROE)
     run_id = await _start(
         engagement_id, ["repro_dns", "repro_active"], preauthorize_active=False
     )
@@ -222,10 +268,11 @@ async def _is_done(run_id: str) -> bool:
 
 @pytest.mark.asyncio
 @pytest.mark.xfail(
-    reason="P0-1: no host discovery for a CIDR-only RoE. The P0-2 fix now makes "
-    "the active module record SKIPPED/zero_eligible_targets (no longer a green "
-    "COMPLETED), but nothing discovers live IPs from the /24 yet - that is "
-    "P0-1's host_discovery module, still gated on Security.",
+    reason="P0-1: no host discovery for a CIDR-only RoE. A CIDR-only RoE creates "
+    "no AuthorizationSnapshot, so the S1b active-surface gate skips every active "
+    "module (SKIPPED/unverified_targets - no longer a green COMPLETED), and "
+    "nothing discovers live IPs from the /24 yet - that is P0-1's host_discovery "
+    "module / G3 CIDR discovery, still gated on Security.",
     strict=True,
 )
 async def test_p0_1_cidr_only_scope_is_accounted_for():
