@@ -12,11 +12,11 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import os
-import re
 import socket
 import xml.etree.ElementTree as ET
 
-from recon.models.enums import ModulePhase, ScopeStatus
+from recon.models.enums import ModulePhase, ScopeStatus, SkipReason
+from recon.modules._targets import is_safe_target as _is_safe_target
 from recon.modules.base import ModuleContext, ReconModule
 from recon.modules.registry import register
 from recon.net.external import find_binary, run_command
@@ -24,28 +24,9 @@ from recon.net.external import find_binary, run_command
 _HOST_TIMEOUT = "5m"
 _MODULE_TIMEOUT = 45 * 60
 
-_HOSTNAME_RE = re.compile(
-    r"^(?![-.])[A-Za-z0-9_.-]{1,253}(?<![-.])$"
-)
-
-
-def _is_safe_target(t: str) -> bool:
-    """Reject anything that isn't a plain single IP or hostname - stops a
-    crafted asset value ('-oN /etc/x', '--script ...') becoming an nmap
-    argument, and stops an over-broad CIDR ('0.0.0.0/0') from being scanned.
-    Asset values are always single hosts, so a network of more than /24 (v4) /
-    /120 (v6) is refused."""
-    t = t.strip()
-    if not t or t.startswith("-"):
-        return False
-    try:
-        net = ipaddress.ip_network(t, strict=False)
-        if net.version == 4:
-            return net.prefixlen >= 24
-        return net.prefixlen >= 120
-    except ValueError:
-        pass
-    return bool(_HOSTNAME_RE.match(t))
+# ``_is_safe_target`` is re-exported from ``recon.modules._targets`` (the shared
+# safe-form helper ``resolve_targets`` applies centrally). Kept as a name here
+# for the adversarial regression tests that import it from this module.
 
 
 async def _dedupe_by_ip(targets: set[str]) -> set[str]:
@@ -109,11 +90,31 @@ class PortScanModule(ReconModule):
                 summary="nmap not found on PATH - port_scan skipped",
                 raw_data={"module": "port_scan"},
             )
+            await ctx.mark_no_input(SkipReason.MISSING_BINARY)
             return
 
-        targets = await self._targets(ctx)
+        # Same-run target handoff (P0-2): resolve_targets reads THIS run's
+        # Evidence directly, so a dependency (dns) that ran earlier in the same
+        # invocation is visible without waiting for end-of-run correlation.
+        # include_prior_assets keeps the pre-P0-2 behaviour of also scanning the
+        # engagement's already-correlated in-scope assets. Scope + safe-form
+        # filtering happen centrally in resolve_targets; the EXCLUDED /
+        # unsafe-form checks below are kept only as defence in depth.
+        resolution = await ctx.resolve_targets(
+            "ip", "hostname", include_prior_assets=True
+        )
+        await ctx.record_target_accounting(resolution)
+        targets = await _dedupe_by_ip(
+            {
+                c.value
+                for c in resolution.eligible
+                if _is_safe_target(c.value)
+                and ctx.scope.classify(c.value).status is not ScopeStatus.EXCLUDED
+            }
+        )
         if not targets:
-            await ctx.progress("no in-scope hosts to port-scan")
+            await ctx.progress("no eligible hosts to port-scan")
+            await ctx.mark_no_input(SkipReason.ZERO_ELIGIBLE_TARGETS)
             return
 
         ctx.check_alive()
@@ -162,18 +163,6 @@ class PortScanModule(ReconModule):
             return
 
         await self._parse(ctx, result.stdout)
-
-    async def _targets(self, ctx: ModuleContext) -> set[str]:
-        oos = ctx.allow_out_of_scope
-        out: set[str] = set()
-        out.update(await ctx.known_assets("ip", in_scope_only=not oos))
-        out.update(await ctx.known_assets("subdomain", "domain", in_scope_only=not oos))
-        safe = {
-            t for t in out
-            if _is_safe_target(t)
-            and ctx.scope.classify(t).status is not ScopeStatus.EXCLUDED
-        }
-        return await _dedupe_by_ip(safe)
 
     async def _parse(self, ctx: ModuleContext, xml_text: str) -> None:
         try:

@@ -125,7 +125,32 @@ class ModuleRunStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    SKIPPED = "skipped"       # already completed in a prior run (resumability)
+    SKIPPED = "skipped"       # see SkipReason for *why* - resumability vs. no input
+
+
+class SkipReason(str, enum.Enum):
+    """Why a ``ScanModuleRun`` ended ``SKIPPED``.
+
+    ``SKIPPED`` alone is ambiguous: a run carried over from an earlier scan
+    (benign, green) looks identical to a module that had zero eligible targets
+    (a release-blocking "the scan did nothing" signal). This discriminator keeps
+    that distinction a schema-level fact, not log prose.
+    """
+
+    #: module already ran in an earlier scan run; this run reused the result
+    RESUMED_PRIOR_RUN = "resumed_prior_run"
+    #: module ran but ``resolve_targets`` returned nothing eligible to act on
+    ZERO_ELIGIBLE_TARGETS = "zero_eligible_targets"
+    #: a required backend/config (e.g. a search provider) is not set
+    NOT_CONFIGURED = "not_configured"
+    #: a required external binary (nmap / ffuf) is not on PATH
+    MISSING_BINARY = "missing_binary"
+    #: a required privilege/capability for the approved method is unavailable
+    #: and there is no approved fallback (Security P0-1 gate §5)
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
+    #: the in-scope target set was non-empty but no target had attested
+    #: liveness, so no active scan ran (Security P0-1 gate §3)
+    UNVERIFIED_TARGETS = "unverified_targets"
 
 
 class WindowStatus(str, enum.Enum):

@@ -10,7 +10,15 @@ import pytest
 
 from recon.db import session_scope
 from recon.models.asset import Asset
-from recon.models.enums import AssetType, InterestLevel, ScopeStatus
+from recon.models.enums import (
+    AssetType,
+    InterestLevel,
+    ModuleRunStatus,
+    ScopeStatus,
+    SkipReason,
+)
+from recon.models.evidence import Evidence
+from recon.models.scanrun import ScanModuleRun
 from recon.modules.active.dir_fuzz import DirFuzzModule
 from recon.modules.active.port_scan import PortScanModule
 from recon.net.external import CommandResult
@@ -66,6 +74,77 @@ async def test_port_scan_parses_services(engagement_id, monkeypatch):
     ports = sorted(e.raw_data["port"] for e in svcs)
     assert ports == [22, 80]  # closed 3306 excluded
     assert any(e.raw_data["product"] == "OpenSSH" for e in svcs)
+
+
+@pytest.mark.asyncio
+async def test_port_scan_consumes_same_run_dns_without_correlation(engagement_id, monkeypatch):
+    """P0-2: a DNS answer written THIS run (no Asset, no correlation) must feed
+    port_scan in the same run, and the run records the target provenance."""
+    monkeypatch.setattr("recon.modules.active.port_scan.find_binary", lambda n: "/usr/bin/nmap")
+    seen: dict = {}
+
+    async def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return CommandResult(argv=argv, returncode=0, stdout="<nmaprun></nmaprun>", stderr="")
+
+    monkeypatch.setattr("recon.modules.active.port_scan.run_command", fake_run)
+
+    async with module_harness(engagement_id, "port_scan") as ctx:
+        # a same-run DNS answer, written to Evidence only (no Asset, no
+        # correlation) - exactly what the `dns` module produces
+        await ctx.add_evidence(
+            subject_type="dns_record", subject_value="api.example.com",
+            raw_data={"name": "api.example.com", "rtype": "A",
+                      "value": "203.0.113.10"},
+        )
+        await ctx.flush()
+        await PortScanModule().run(ctx)
+        module_run_id = ctx._module_run.id
+
+    assert "203.0.113.10" in seen.get("argv", [])
+    async with session_scope() as s:
+        row = await s.get(ScanModuleRun, module_run_id)
+        acct = (row.coverage_metadata or {}).get("target_accounting")
+    assert acct and acct["eligible"] >= 1
+    assert acct["by_source"].get("current_run_dns")
+
+
+_CIDR_ONLY_ROE = """
+engagement:
+  name: "CIDR only"
+  client: "self"
+  authorized_window: {start: "2026-01-01T00:00:00Z", end: "2030-01-01T00:00:00Z"}
+scope:
+  in_scope:
+    cidrs: ["192.168.9.0/24"]
+rate_limits: {max_requests_per_second: 10, max_concurrent_connections: 20}
+evasion: {user_agents: ["UA-1"]}
+llm: {analysis_enabled: false}
+"""
+
+
+@pytest.mark.asyncio
+async def test_port_scan_no_targets_is_skipped_not_green(monkeypatch):
+    """P0-2 / P0-1: an active run with nothing eligible is SKIPPED with a
+    no-input reason, never an indistinguishable green COMPLETED. A CIDR-only
+    RoE with no host discovery evidence resolves to zero eligible targets."""
+    from recon.orchestrator.engagements import EngagementService
+
+    async with session_scope() as s:
+        eng, _ = await EngagementService().create(s, _CIDR_ONLY_ROE)
+        eng_id = eng.id
+
+    monkeypatch.setattr("recon.modules.active.port_scan.find_binary", lambda n: "/usr/bin/nmap")
+
+    async def fake_run(argv, **kw):
+        raise AssertionError("nmap must not run with zero targets")
+
+    monkeypatch.setattr("recon.modules.active.port_scan.run_command", fake_run)
+
+    async with module_harness(eng_id, "port_scan") as ctx:
+        await PortScanModule().run(ctx)
+        assert ctx._module_run.status is ModuleRunStatus.SKIPPED
+        assert ctx._module_run.skip_reason is SkipReason.ZERO_ELIGIBLE_TARGETS
 
 
 @pytest.mark.asyncio

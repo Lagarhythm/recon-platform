@@ -24,6 +24,7 @@ from recon.models.enums import (
     ModulePhase,
     ModuleRunStatus,
     ScanRunStatus,
+    SkipReason,
 )
 from recon.models.scanrun import ScanModuleRun, ScanRun
 from recon.modules.base import (
@@ -324,10 +325,17 @@ class ScanService:
                 module_run.completed_at = utcnow()
                 await session.commit()
                 await self._append_completed(scan_run_id, mod.name)
+                accounting = (module_run.coverage_metadata or {}).get("target_accounting")
                 await event_bus.publish(
                     scan_run_id, "module_skipped" if module_run.status is ModuleRunStatus.SKIPPED else "module_completed", module=mod.name,
                     evidence=module_run.evidence_count, errors=module_run.error_count,
                     duration=_duration(),
+                    skip_reason=(
+                        module_run.skip_reason.value
+                        if module_run.skip_reason is not None else None
+                    ),
+                    targets=(accounting or {}).get("eligible"),
+                    target_sources=(accounting or {}).get("by_source"),
                 )
             except ScanCancelled:
                 await ctx.flush()
@@ -458,6 +466,10 @@ class ScanService:
             if row.status in (ModuleRunStatus.COMPLETED, ModuleRunStatus.FAILED):
                 return False
             row.status = ModuleRunStatus.SKIPPED
+            # A benign carry-over from an earlier scan run - explicitly distinct
+            # from a "module had no input" SKIPPED so the release gate can tell
+            # them apart.
+            row.skip_reason = SkipReason.RESUMED_PRIOR_RUN
             return True
 
     async def _append_completed(self, scan_run_id: str, module_name: str) -> None:

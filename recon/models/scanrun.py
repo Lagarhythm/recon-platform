@@ -7,7 +7,13 @@ from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from recon.models.base import Base, DateTimeUTC, TimestampMixin, UUIDPk
-from recon.models.enums import ModulePhase, ModuleRunStatus, ScanRunStatus, enum_col
+from recon.models.enums import (
+    ModulePhase,
+    ModuleRunStatus,
+    ScanRunStatus,
+    SkipReason,
+    enum_col,
+)
 
 
 class ScanRun(UUIDPk, TimestampMixin, Base):
@@ -60,6 +66,12 @@ class ScanModuleRun(UUIDPk, Base):
     phase: Mapped[ModulePhase] = mapped_column(enum_col(ModulePhase), nullable=False)
     status: Mapped[ModuleRunStatus] = mapped_column(
         enum_col(ModuleRunStatus), default=ModuleRunStatus.PENDING, nullable=False
+    )
+    # Only meaningful when ``status is SKIPPED``. Separates a benign resumed run
+    # from a "module had no input" outcome the release gate must not treat as a
+    # clean scan.
+    skip_reason: Mapped[SkipReason | None] = mapped_column(
+        enum_col(SkipReason), nullable=True
     )
     order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 

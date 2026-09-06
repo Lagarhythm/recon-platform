@@ -40,7 +40,7 @@
 <h2>Modules</h2>
 <div class="panel">
   <table>
-    <thead><tr><th>#</th><th>Module</th><th>Phase</th><th>Status</th><th>Progress</th><th>Evidence</th><th>Errors</th><th>Duration</th></tr></thead>
+    <thead><tr><th>#</th><th>Module</th><th>Phase</th><th>Status</th><th>Progress</th><th>Targets</th><th>Evidence</th><th>Errors</th><th>Duration</th></tr></thead>
     <tbody id="module-rows">
       {% for m in module_rows %}
       <tr data-module="{{ m.module_name }}"
@@ -50,10 +50,20 @@
         <td class="muted">{{ m.order_index + 1 }}</td>
         <td><strong>{{ m.module_name }}</strong></td>
         <td class="muted">{{ m.phase.value }}</td>
-        <td class="col-status"><span class="badge {{ m.status.value }}">{{ m.status.value }}</span></td>
+        <td class="col-status">
+          <span class="badge {{ m.status.value }}">{{ m.status.value }}</span>
+          {%- if m.skip_reason %}<span class="muted mono" style="font-size:.72rem"> {{ m.skip_reason.value }}</span>{% endif -%}
+        </td>
         <td class="col-progress mono muted">
           {%- if m.status.value == 'running' -%}
           <span class="progress-bar indeterminate"><span class="progress-fill"></span></span><span class="pct"></span>
+          {%- endif -%}
+        </td>
+        <td class="col-targets mono muted" style="font-size:.78rem">
+          {%- set acct = (m.coverage_metadata or {}).get('target_accounting') -%}
+          {%- if acct -%}
+          {{ acct.eligible }}
+          {%- if acct.by_source %} ({% for k, v in acct.by_source.items() %}{{ k }}:{{ v }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif -%}
           {%- endif -%}
         </td>
         <td class="col-evidence">{{ m.evidence_count }}</td>
@@ -180,6 +190,31 @@
     var row = rowFor(mod);
     if (row) row.querySelector('.col-duration').textContent = fmtDur(seconds);
   }
+  function setTargets(mod, count, sources) {
+    var row = rowFor(mod);
+    if (!row || count === undefined || count === null) return;
+    var cell = row.querySelector('.col-targets');
+    if (!cell) return;
+    var txt = String(count);
+    if (sources && Object.keys(sources).length) {
+      txt += ' (' + Object.keys(sources).map(function (k) {
+        return k + ':' + sources[k];
+      }).join(', ') + ')';
+    }
+    cell.textContent = txt;
+  }
+  function setSkipReason(mod, reason) {
+    var row = rowFor(mod);
+    if (!row || !reason) return;
+    var cell = row.querySelector('.col-status');
+    if (cell && cell.textContent.indexOf(reason) === -1) {
+      var s = document.createElement('span');
+      s.className = 'muted mono';
+      s.style.fontSize = '.72rem';
+      s.textContent = ' ' + reason;
+      cell.appendChild(s);
+    }
+  }
 
   function handle(e) {
     var t = new Date().toLocaleTimeString();
@@ -196,8 +231,10 @@
         }
         return;
       case 'module_completed':
-        line(t + '  ✔ ' + e.module + '  evidence=' + e.evidence + ' errors=' + e.errors);
+        line(t + '  ✔ ' + e.module + '  evidence=' + e.evidence + ' errors=' + e.errors
+             + (e.targets !== undefined && e.targets !== null ? '  targets=' + e.targets : ''));
         markRow(e.module, 'completed', e.evidence, e.errors);
+        setTargets(e.module, e.targets, e.target_sources);
         clearProgress(e.module, 100);
         if (e.duration !== undefined) setDuration(e.module, e.duration);
         return;
@@ -208,8 +245,11 @@
         if (e.duration !== undefined) setDuration(e.module, e.duration);
         return;
       case 'module_skipped':
-        line(t + '  – ' + e.module + ' skipped (already complete)');
+        line(t + '  – ' + e.module + ' skipped'
+             + (e.skip_reason ? ' (' + e.skip_reason + ')' : ' (already complete)'));
         markRow(e.module, 'skipped');
+        setTargets(e.module, e.targets, e.target_sources);
+        setSkipReason(e.module, e.skip_reason);
         return;
       case 'progress':
         line(t + '    ' + e.module + ': ' + e.message);

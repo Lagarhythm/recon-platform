@@ -73,6 +73,7 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
             "partial" if m.error_count else ("completed-no-evidence" if m.status.value == "completed" and not m.evidence_count else m.status.value))
         modules_by_run.setdefault(m.scan_run_id, []).append({"name": m.module_name, "status": outcome,
             "reason": m.error if outcome == "skipped" else None,
+            "skip_reason": m.skip_reason.value if m.skip_reason is not None else None,
             "error_count": m.error_count, "evidence_count": m.evidence_count,
             "coverage_metadata": m.coverage_metadata or {}})
     audit_total = (

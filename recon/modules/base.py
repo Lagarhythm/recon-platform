@@ -22,7 +22,13 @@ from recon.core.roe import RoEConfig
 from recon.core.scope import ScopeManager
 from recon.models.artifact import Artifact
 from recon.models.engagement import Engagement
-from recon.models.enums import FindingPolarity, ModulePhase, ModuleRunStatus, ScopeStatus
+from recon.models.enums import (
+    FindingPolarity,
+    ModulePhase,
+    ModuleRunStatus,
+    ScopeStatus,
+    SkipReason,
+)
 from recon.models.evidence import Evidence
 from recon.models.scanrun import ScanModuleRun
 from recon.net.http_client import ReconHTTPClient
@@ -198,6 +204,60 @@ class ModuleContext:
         async with self._lock:
             self._module_run.coverage_metadata = dict(metadata)
             await self._tick()
+
+    async def mark_no_input(self, reason: SkipReason | str) -> None:
+        """Persist a *no-input* outcome: the module ran but had nothing eligible
+        to act on (``zero_eligible_targets``), a required backend was not
+        configured (``not_configured``), or its binary was absent
+        (``missing_binary``).
+
+        This is distinct from ``mark_skipped`` (free-text) and from a benign
+        ``COMPLETED`` with zero evidence: the release gate must be able to tell
+        "the scan did nothing because there was nothing to do" apart from a
+        clean empty result. ``ScanService`` will not overwrite ``SKIPPED`` with
+        ``COMPLETED``.
+        """
+        reason = SkipReason(reason)
+        async with self._lock:
+            self._module_run.status = ModuleRunStatus.SKIPPED
+            self._module_run.skip_reason = reason
+            self._module_run.error = f"no input: {reason.value}"
+            await self._tick()
+
+    async def record_target_accounting(self, resolution: Any) -> None:
+        """Persist the bounded target-provenance summary from
+        :meth:`resolve_targets` into ``coverage_metadata['target_accounting']``
+        so the run page / events / CLI can state the number and provenance of
+        targets supplied to this active module (P0-2 acceptance)."""
+        async with self._lock:
+            md = dict(self._module_run.coverage_metadata or {})
+            md["target_accounting"] = resolution.accounting()
+            self._module_run.coverage_metadata = md
+            await self._tick()
+
+    async def resolve_targets(
+        self, *accept_types: str, include_prior_assets: bool = False
+    ) -> Any:
+        """Build this active module's target set for the CURRENT scan run.
+
+        Draws from current-run Evidence (a same-run dependency's output is
+        visible without waiting for correlation - the P0-2 fix), RoE-declared
+        hosts/domains, and optionally the engagement's prior correlated Assets
+        (``include_prior_assets``). Scope classification and safe-form
+        validation are applied centrally, so an EXCLUDED / out-of-scope / crafted
+        value can never reach the returned ``eligible`` list.
+        """
+        from recon.modules._targets import resolve_targets
+
+        return await resolve_targets(
+            self, *accept_types, include_prior_assets=include_prior_assets
+        )
+
+    async def _scalars(self, stmt: Any) -> list[Any]:
+        """Run a SELECT on the module's session under the write lock and return
+        the scalar rows. Used by :mod:`recon.modules._targets`."""
+        async with self._lock:
+            return list((await self._session.execute(stmt)).scalars().all())
 
     async def add_artifact(
         self,

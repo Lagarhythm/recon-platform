@@ -295,6 +295,15 @@ class InProcessClient(ReconClient):
                     "status": r.status.value if hasattr(r.status, "value") else r.status,
                     "evidence": r.evidence_count,
                     "errors": r.error_count,
+                    "skip_reason": (
+                        r.skip_reason.value
+                        if getattr(r, "skip_reason", None) is not None
+                        else None
+                    ),
+                    # P0-2: number and provenance of targets supplied to an
+                    # active module (None for modules that do not resolve
+                    # targets).
+                    "targets": (r.coverage_metadata or {}).get("target_accounting"),
                 }
                 for r in rows
             ]
