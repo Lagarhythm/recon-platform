@@ -25,6 +25,8 @@ from __future__ import annotations
 import inspect
 import sys
 
+import pytest
+
 from recon.models.enums import ModulePhase
 from recon.modules.registry import MODULES, load_builtin_modules
 
@@ -98,3 +100,83 @@ def test_legacy_pending_modules_still_use_a_legacy_reader() -> None:
             f"{name} no longer uses a legacy target reader - move it from "
             f"_LEGACY_TARGET_READERS_PENDING_G2 to _ROUTES_THROUGH_RESOLVE_TARGETS"
         )
+
+
+# ---------------------------------------------------------------------------
+# G2 phase 3: the permit-only executor boundary itself.
+#
+# The active *modules* migrate onto this boundary in G2/G3 (the ledger above
+# still tracks that). What is asserted here is that the boundary components
+# exist and fail closed: the permit is not caller-constructible, and the
+# executor exposes no method that takes a target string.
+# ---------------------------------------------------------------------------
+
+_ASYNC = pytest.mark.asyncio
+
+
+def test_active_target_permit_is_not_caller_constructible() -> None:
+    from recon.net.permit import ActiveTargetPermit, PermitError
+
+    fields = {
+        "destination_ip": "203.0.113.5",
+        "operation": "dns_connect_bind",
+        "method_profile_id": "dns_connect_bind_v1",
+        "effective_argv_shape": (),
+        "scan_run_id": "r",
+        "scan_module_run_id": "m",
+        "module_name": "dns",
+        "authorization_snapshot_id": "s",
+        "authorized_cidr_id": None,
+        "authorized_target_id": "t",
+        "parent_authorized_cidr": None,
+        "source_hostname": "h.example.com",
+        "checkpoint_ack_hash": "a",
+        "policy_version": "p1",
+        "liveness_attestation_id": None,
+    }
+    with pytest.raises(PermitError):
+        ActiveTargetPermit(**fields)
+
+
+def test_active_executor_has_no_target_string_entry_point() -> None:
+    from recon.net.active_executor import ActiveExecutor
+
+    public = [n for n in dir(ActiveExecutor) if not n.startswith("_")]
+    assert public == ["run"], (
+        f"ActiveExecutor grew a public method besides run(): {public}"
+    )
+    sig = inspect.signature(ActiveExecutor.run)
+    params = [p for p in sig.parameters if p != "self"]
+    assert params == ["permit"], params
+    for bad in ("host", "hostname", "target", "url"):
+        assert bad not in params
+
+
+def test_active_executor_module_revalidates_the_socket_peer() -> None:
+    import recon.net.active_executor as mod
+
+    src = inspect.getsource(mod)
+    assert "getpeername" in src or 'get_extra_info("peername")' in src
+    assert "predispatch" in src.lower()
+
+
+@_ASYNC
+async def test_executor_rejects_a_raw_string_target() -> None:
+    from recon.net.active_executor import ActiveExecutor
+    from recon.net.permit import PermitError
+
+    async def _noop(_p):
+        return None
+
+    class _RL:
+        async def acquire(self):
+            return None
+
+    ex = ActiveExecutor(
+        rate_limiter=_RL(),
+        kill_switch=type("K", (), {"is_engaged": False})(),
+        is_cancelled=lambda: False,
+        predispatch_check=_noop,
+    )
+    with pytest.raises(PermitError):
+        await ex.run("203.0.113.5")
