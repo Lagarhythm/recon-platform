@@ -21,6 +21,19 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
 
+# Operator-facing label for each ``ScanModuleRun.skip_reason``. Keeps the report
+# from rendering a no-input skip as an ambiguous bare "skipped" or, worse, a
+# clean empty result (P0-1 assessment; RECON_P0_P01_REVISED_TARGET_CONTRACT §7).
+_SKIP_LABELS = {
+    "resumed_prior_run": "completed in an earlier run (resumed)",
+    "zero_eligible_targets": "skipped - no eligible targets to act on",
+    "not_configured": "skipped - required backend not configured",
+    "missing_binary": "skipped - required tool not installed",
+    "capability_unavailable": "skipped - required capability/privilege unavailable",
+    "unverified_targets": "skipped - in-scope targets had no verified liveness",
+}
+
+
 async def build_report_data(session: AsyncSession, engagement: Engagement) -> dict[str, Any]:
     assets = list(
         (
@@ -69,11 +82,20 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
         ScanModuleRun.engagement_id == engagement.id))).scalars())
     modules_by_run: dict[str, list[dict[str, Any]]] = {}
     for m in module_runs:
+        sr = m.skip_reason.value if m.skip_reason is not None else None
         outcome = "failed" if m.status.value == "failed" else (
             "partial" if m.error_count else ("completed-no-evidence" if m.status.value == "completed" and not m.evidence_count else m.status.value))
+        # A module carried over from an earlier run of this engagement genuinely
+        # ran before and its evidence is already in that run - it is NOT a
+        # coverage gap. Every other skip (no eligible targets, backend not
+        # configured, missing binary, capability/liveness unavailable) is, and
+        # must never read as a clean zero-finding result.
+        is_coverage_gap = outcome in ("failed", "partial") or (
+            outcome == "skipped" and sr != "resumed_prior_run")
         modules_by_run.setdefault(m.scan_run_id, []).append({"name": m.module_name, "status": outcome,
-            "reason": m.error if outcome == "skipped" else None,
-            "skip_reason": m.skip_reason.value if m.skip_reason is not None else None,
+            "reason": (_SKIP_LABELS.get(sr) or m.error) if outcome == "skipped" else None,
+            "skip_reason": sr,
+            "coverage_gap": is_coverage_gap,
             "error_count": m.error_count, "evidence_count": m.evidence_count,
             "coverage_metadata": m.coverage_metadata or {}})
     audit_total = (
@@ -159,7 +181,7 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
             "scan_runs": len(runs),
             "audit_entries": audit_total,
             "out_of_scope_overrides": override_count,
-            "incomplete_coverage": any(m["status"] in ("failed", "partial", "skipped") for ms in modules_by_run.values() for m in ms),
+            "incomplete_coverage": any(m["coverage_gap"] for ms in modules_by_run.values() for m in ms),
         },
         "findings": findings,
         "negative_findings": negative,
@@ -183,8 +205,8 @@ async def build_report_data(session: AsyncSession, engagement: Engagement) -> di
                 "started_at": _iso(r.started_at),
                 "completed_at": _iso(r.completed_at),
                 "module_outcomes": modules_by_run.get(r.id, []),
-                "coverage_note": "Incomplete coverage: one or more modules failed, returned partial results, or were skipped; zero findings are not a clean result."
-                    if any(m["status"] in ("failed", "partial", "skipped") for m in modules_by_run.get(r.id, [])) else None,
+                "coverage_note": "Incomplete coverage: one or more modules failed, returned partial results, or were skipped without acting; zero findings are not a clean result."
+                    if any(m["coverage_gap"] for m in modules_by_run.get(r.id, [])) else None,
             }
             for r in runs
         ],

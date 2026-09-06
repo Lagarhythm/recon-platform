@@ -127,10 +127,11 @@ class TargetCandidate:
     scope_status: ScopeStatus
     exclusion_reason: str | None = None
     resolved_ips: tuple[str, ...] = ()
-    #: CONTRACT-PENDING (Security P0-1 gate §3): this becomes a structured
-    #: ``LivenessAttestation``, not a bool. P0-2 consumers must NOT branch on
-    #: it - it is provenance only for now. port_scan ignores it.
-    verified_live: bool = False
+    # NOTE: there is deliberately no ``verified_live`` field. The P0-1 revised
+    # target contract (RECON_P0_P01_REVISED_TARGET_CONTRACT.md §2-3) replaces a
+    # self-asserted liveness bool with an immutable ``LivenessAttestation`` that
+    # only the permit resolver can bind. Until those models land (G2+), a
+    # candidate carries provenance only and grants no permission to do I/O.
 
 
 @dataclass
@@ -185,11 +186,10 @@ def _canon_ip(value: str) -> str | None:
 
 class _RawCandidate:
     __slots__ = ("value", "target_type", "source_kind", "source_module",
-                 "source_evidence_id", "scan_run_id", "resolved_ips", "verified_live")
+                 "source_evidence_id", "scan_run_id", "resolved_ips")
 
     def __init__(self, value, target_type, source_kind, *, source_module=None,
-                 source_evidence_id=None, scan_run_id=None, resolved_ips=(),
-                 verified_live=False):  # noqa: ANN001
+                 source_evidence_id=None, scan_run_id=None, resolved_ips=()):  # noqa: ANN001
         self.value = value
         self.target_type = target_type
         self.source_kind = source_kind
@@ -197,7 +197,6 @@ class _RawCandidate:
         self.source_evidence_id = source_evidence_id
         self.scan_run_id = scan_run_id
         self.resolved_ips = tuple(resolved_ips)
-        self.verified_live = verified_live
 
 
 def _evidence_source_kind(module: str | None, subject_type: str) -> str:
@@ -212,7 +211,6 @@ def _raw_from_evidence(ev: Evidence) -> list[_RawCandidate]:
     st = ev.subject_type
     raw = ev.raw_data or {}
     kind = _evidence_source_kind(ev.source_module, st)
-    verified = ev.source_module == "host_discovery" or bool(raw.get("nmap_state") == "up")
     out: list[_RawCandidate] = []
 
     if st == "dns_record":
@@ -237,15 +235,14 @@ def _raw_from_evidence(ev: Evidence) -> list[_RawCandidate]:
             rips = (rips,) if isinstance(rips, str) else tuple(rips or ())
             out.append(_RawCandidate(host, HOSTNAME, kind, source_module=ev.source_module,
                                      source_evidence_id=ev.id, scan_run_id=ev.scan_run_id,
-                                     resolved_ips=rips, verified_live=verified))
+                                     resolved_ips=rips))
         return out
 
     if st == "ip":
         ip = _canon_ip(ev.subject_value)
         if ip:
             out.append(_RawCandidate(ip, IP, kind, source_module=ev.source_module,
-                                     source_evidence_id=ev.id, scan_run_id=ev.scan_run_id,
-                                     verified_live=verified))
+                                     source_evidence_id=ev.id, scan_run_id=ev.scan_run_id))
         return out
 
     if st in ("url", "endpoint", "http_endpoint"):
@@ -390,7 +387,6 @@ async def resolve_targets(
             source_module=rc.source_module, source_evidence_id=rc.source_evidence_id,
             scan_run_id=rc.scan_run_id, scope_status=status,
             exclusion_reason=exclusion_reason, resolved_ips=rc.resolved_ips,
-            verified_live=rc.verified_live,
         )
         if exclusion_reason is None:
             _stash(best, cand, _rank)

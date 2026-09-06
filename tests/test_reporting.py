@@ -288,6 +288,43 @@ async def test_skipped_coverage_and_exclusions_are_reported(engagement_id):
 
 
 @pytest.mark.asyncio
+async def test_skip_reason_distinguishes_benign_resume_from_no_input(engagement_id):
+    """A module carried over from an earlier run is NOT a coverage gap; a module
+    that skipped because it had no eligible targets IS, and carries an
+    operator-facing label (RECON_P0_P01_REVISED_TARGET_CONTRACT §7)."""
+    from recon.models.enums import SkipReason
+
+    async with session_scope() as s:
+        eng = await s.get(Engagement, engagement_id)
+        run = ScanRun(engagement_id=engagement_id, roe_config_snapshot={},
+                      roe_config_hash=eng.roe_config_hash, status="completed",
+                      modules_requested=["dns", "port_scan"])
+        s.add(run)
+        await s.flush()
+        s.add_all([
+            ScanModuleRun(scan_run_id=run.id, engagement_id=engagement_id,
+                          module_name="dns", phase=ModulePhase.PASSIVE,
+                          status=ModuleRunStatus.SKIPPED,
+                          skip_reason=SkipReason.RESUMED_PRIOR_RUN),
+            ScanModuleRun(scan_run_id=run.id, engagement_id=engagement_id,
+                          module_name="port_scan", phase=ModulePhase.ACTIVE,
+                          status=ModuleRunStatus.SKIPPED,
+                          skip_reason=SkipReason.ZERO_ELIGIBLE_TARGETS,
+                          error="no input: zero_eligible_targets"),
+        ])
+    report = await _data(engagement_id)
+    outcomes = {row["name"]: row for row in report["scan_runs"][0]["module_outcomes"]}
+
+    assert outcomes["dns"]["coverage_gap"] is False
+    assert outcomes["dns"]["skip_reason"] == "resumed_prior_run"
+    assert outcomes["port_scan"]["coverage_gap"] is True
+    assert outcomes["port_scan"]["skip_reason"] == "zero_eligible_targets"
+    assert "no eligible targets" in outcomes["port_scan"]["reason"]
+    assert report["summary"]["incomplete_coverage"] is True
+    assert "zero findings" in (report["scan_runs"][0]["coverage_note"] or "")
+
+
+@pytest.mark.asyncio
 async def test_compact_surfaces_osint_block(engagement_id):
     async with session_scope() as s:
         s.add(Asset(engagement_id=engagement_id, type=AssetType.ORGANIZATION,

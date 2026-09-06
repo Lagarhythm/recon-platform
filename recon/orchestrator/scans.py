@@ -240,8 +240,12 @@ class ScanService:
                     # earlier scan run is genuinely "skipped".
                     was_skipped = await self._skip_if_pending(scan_run_id, mod.name)
                     if was_skipped:
+                        # Carry the sub-reason on the event too, so the live UI
+                        # renders "skipped (resumed_prior_run)" consistently with
+                        # the module_completed/module_skipped path below.
                         await event_bus.publish(
-                            scan_run_id, "module_skipped", module=mod.name
+                            scan_run_id, "module_skipped", module=mod.name,
+                            skip_reason=SkipReason.RESUMED_PRIOR_RUN.value,
                         )
                     continue
 
