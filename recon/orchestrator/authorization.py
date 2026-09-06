@@ -3,10 +3,20 @@ persistence").
 
 When a run with active modules passes the passive->active checkpoint, this
 writes the one immutable :class:`~recon.models.authz.AuthorizationSnapshot` that
-every later permit is bound to, plus an :class:`~recon.models.authz.AuthorizedTarget`
-row for each exact in-scope hostname (D0 - ``dns_connect_bind_v1``). CIDR
-authorization rows are NOT written here: CIDR discovery profiles are disabled in
-``BOOTSTRAP_POLICY`` for P0-1.
+every later permit is bound to, plus:
+
+* an :class:`~recon.models.authz.AuthorizedTarget` row for each exact in-scope
+  hostname (D0 - ``dns_connect_bind_v1``);
+* an :class:`~recon.models.authz.AuthorizedCidr` row for each exact canonical
+  in-scope RoE CIDR.
+
+The CIDR rows exist **only** so D0 can check that a hostname's resolved IP falls
+inside a checkpoint-acknowledged network before it connect-binds (Security G2
+re-review, Q1). No expansion, manifest, or CIDR host-discovery happens here or
+anywhere in G2 - those remain disabled in ``BOOTSTRAP_POLICY`` and are G3's. The
+discovery prefix ceiling (/24, /120, aggregate 256) is applied by G3 when it
+selects rows for expansion, not at persistence: the acknowledged RoE is recorded
+as-is.
 
 Actor identity: ``confirmed_by_user_id`` if the caller supplies one, else the
 sole ``User`` row. If more than one user exists and no id was supplied this
@@ -18,14 +28,20 @@ single-operator assumption is made self-enforcing (F4, Security re-review).
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from recon.core.active_policy import BOOTSTRAP_POLICY
+from recon.core.netscope import NetscopeError, canonical_cidr
 from recon.core.roe import RoEConfig
-from recon.models.authz import AuthorizationSnapshot, AuthorizedTarget
+from recon.models.authz import (
+    AuthorizationSnapshot,
+    AuthorizedCidr,
+    AuthorizedTarget,
+)
 from recon.models.base import utcnow
 from recon.models.scanrun import ScanRun
 from recon.models.user import User
@@ -66,14 +82,35 @@ def _scope_policy_hash(roe: RoEConfig) -> str:
     return hashlib.sha256(_canonical(subset)).hexdigest()
 
 
-def _checkpoint_payload(roe: RoEConfig, hostnames: list[str]) -> dict:
+def _authorized_cidrs(roe: RoEConfig) -> list[str]:
+    """The exact in-scope RoE CIDRs in canonical form, deduplicated and sorted.
+
+    The RoE loader already masks host bits (``strict=False``); routing through
+    the single netscope canonicaliser keeps one component in charge of the form.
+    A value that still will not canonicalise is a fail-closed error - we do not
+    let the operator "acknowledge" a CIDR set we could not fully record.
+    """
+    out: set[str] = set()
+    for raw in roe.scope.in_scope.cidrs:
+        if not raw:
+            continue
+        try:
+            out.add(canonical_cidr(raw))
+        except NetscopeError as exc:
+            raise AuthorizationError(
+                f"in-scope CIDR {raw!r} is not canonical: {exc}"
+            ) from exc
+    return sorted(out)
+
+
+def _checkpoint_payload(roe: RoEConfig, hostnames: list[str], cidrs: list[str]) -> dict:
     """Exactly what the operator is acknowledging (Security invariant 7)."""
     p = BOOTSTRAP_POLICY
     return {
         "schema": "recon.active_checkpoint.v1",
         "policy_version": p.version,
         "authorized_hostnames": sorted(hostnames),
-        "authorized_cidrs": [],  # CIDR discovery disabled for P0-1
+        "authorized_cidrs": sorted(cidrs),  # membership-check only; no discovery
         "methods": sorted(p.method_allowlist),
         "per_method_ports": {k: list(v) for k, v in sorted(p.per_method_ports.items())},
         "per_method_rate": dict(sorted(p.per_method_rate.items())),
@@ -143,7 +180,8 @@ async def create_active_snapshot(
 
     actor_id = await _resolve_actor(session, confirmed_by_user_id)
     hostnames = sorted({h.strip().lower().rstrip(".") for h in roe.scope.in_scope.hosts if h})
-    payload = _checkpoint_payload(roe, hostnames)
+    cidrs = _authorized_cidrs(roe)
+    payload = _checkpoint_payload(roe, hostnames, cidrs)
 
     snapshot = AuthorizationSnapshot(
         scan_run_id=run.id,
@@ -167,6 +205,19 @@ async def create_active_snapshot(
                 target_type="hostname",
                 value=hostname,
                 source="roe_host",
+            )
+        )
+    for cidr in cidrs:
+        net = ipaddress.ip_network(cidr)
+        session.add(
+            AuthorizedCidr(
+                snapshot_id=snapshot.id,
+                cidr=cidr,
+                ip_version=net.version,
+                # informational only in G2 (membership check does not expand);
+                # clamp so a wide IPv6 grant cannot overflow a 64-bit column.
+                address_count=min(net.num_addresses, 2**63 - 1),
+                source="roe_cidr",
             )
         )
     await session.flush()

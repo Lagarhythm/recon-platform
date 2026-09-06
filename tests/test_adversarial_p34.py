@@ -13,7 +13,6 @@ the module-method seam, subprocess via ``run_command``, the LLM via
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
@@ -33,7 +32,6 @@ from recon.modules.active.dns_axfr import DNSZoneTransferModule
 from recon.modules.active.port_scan import PortScanModule
 from recon.modules.active.subdomain_brute import SubdomainBruteModule
 from recon.net.backoff import BackoffController
-from recon.net.external import CommandResult
 from recon.reporting.redaction import RedactionMode, _scrub_paths, redact_report
 from tests.conftest import EXAMPLE_ROE
 from tests.harness import evidence_for, module_harness
@@ -103,7 +101,7 @@ async def test_dns_axfr_skips_excluded_apex(monkeypatch):
 
     probed: list[str] = []
 
-    async def fake_probe(self, ctx, resolver, domain):  # noqa: ANN001
+    async def fake_probe(self, ctx, resolver, domain):
         probed.append(domain)
 
     monkeypatch.setattr(DNSZoneTransferModule, "_probe_domain", fake_probe)
@@ -127,7 +125,7 @@ async def test_subdomain_brute_skips_excluded_apex(monkeypatch):
 
     bruted: list[str] = []
 
-    async def fake_brute(self, ctx, resolver, apex, labels, sem, concurrency, rps):  # noqa: ANN001, PLR0913
+    async def fake_brute(self, ctx, resolver, apex, labels, sem, concurrency, rps):
         bruted.append(apex)
 
     monkeypatch.setattr(SubdomainBruteModule, "_brute_apex", fake_brute)
@@ -157,7 +155,7 @@ async def test_dns_axfr_skips_excluded_asset_even_with_override(monkeypatch):
 
     probed: list[str] = []
 
-    async def fake_probe(self, ctx, resolver, domain):  # noqa: ANN001
+    async def fake_probe(self, ctx, resolver, domain):
         probed.append(domain)
 
     monkeypatch.setattr(DNSZoneTransferModule, "_probe_domain", fake_probe)
@@ -172,29 +170,27 @@ async def test_dns_axfr_skips_excluded_asset_even_with_override(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_port_scan_still_excludes_excluded_asset_with_override(monkeypatch):
-    """Regression lock: port_scan DOES filter EXCLUDED even under an override.
-    This is the correct behaviour that dns_axfr / subdomain_brute are missing.
+async def test_port_scan_out_of_g2_skips_even_under_override(monkeypatch):
+    """Regression lock: port_scan is out of the G2 active surface (Security G2
+    re-review, S2). It fails closed to SKIPPED / unverified_targets and execs
+    nothing, even with an out-of-scope override set and in-scope assets present.
     """
+    from recon.net import external
+
     engagement_id = await _make_engagement(EXAMPLE_ROE)
     await _seed_asset(engagement_id, AssetType.SUBDOMAIN, "mail.example.com", ScopeStatus.EXCLUDED)
     await _seed_asset(engagement_id, AssetType.IP, "203.0.113.10", ScopeStatus.IN_SCOPE)
 
-    monkeypatch.setattr("recon.modules.active.port_scan.find_binary", lambda n: "/usr/bin/nmap")
-    seen: dict = {}
+    async def _boom(*a, **k):
+        raise AssertionError("port_scan must not exec a subprocess in G2")
 
-    async def fake_run(argv, **kw):  # noqa: ANN001, ANN003
-        seen["argv"] = argv
-        return CommandResult(argv=argv, returncode=0, stdout="<nmaprun></nmaprun>", stderr="")
-
-    monkeypatch.setattr("recon.modules.active.port_scan.run_command", fake_run)
+    monkeypatch.setattr(external, "run_command", _boom)
 
     async with module_harness(engagement_id, "port_scan") as ctx:
         ctx.allow_out_of_scope = True
         await PortScanModule().run(ctx)
-
-    assert "mail.example.com" not in seen.get("argv", [])
-    assert "203.0.113.10" in seen.get("argv", [])
+        assert ctx._module_run.status.value == "skipped"
+        assert ctx._module_run.skip_reason.value == "unverified_targets"
 
 
 @pytest.mark.asyncio
@@ -231,7 +227,7 @@ async def test_subdomain_brute_rate_limits_every_dns_query(engagement_id, monkey
     class _ZoneAns:
         rrset = ["soa"]  # non-empty -> example.com looks like a real zone
 
-    async def fake_resolve(self, name, rtype, raise_on_no_answer=False):  # noqa: ANN001
+    async def fake_resolve(self, name, rtype, raise_on_no_answer=False):
         resolve_calls["n"] += 1
         return _ZoneAns() if rtype in ("SOA", "NS") else _Ans()
 
@@ -239,7 +235,7 @@ async def test_subdomain_brute_rate_limits_every_dns_query(engagement_id, monkey
 
     real_acquire = RateLimiter.acquire
 
-    async def counting_acquire(self):  # noqa: ANN001
+    async def counting_acquire(self):
         acquire_calls["n"] += 1
 
     monkeypatch.setattr("dns.asyncresolver.Resolver.resolve", fake_resolve)
@@ -446,7 +442,7 @@ async def test_analyst_payload_redacts_secret_under_any_key(engagement_id, monke
 
     captured: dict = {}
 
-    async def fake_chat(self, system, user, **kw):  # noqa: ANN001, ANN003
+    async def fake_chat(self, system, user, **kw):
         captured["user"] = user
         from recon.llm.client import LLMResult
 
@@ -480,7 +476,7 @@ async def test_analyst_handles_null_llm_content(engagement_id, monkeypatch):
         eng = await s.get(Engagement, engagement_id)
         eng.llm_analysis_enabled = True
 
-    async def fake_chat(self, system, user, **kw):  # noqa: ANN001, ANN003
+    async def fake_chat(self, system, user, **kw):
         from recon.llm.client import LLMResult
 
         return LLMResult(content=None, model="m", usage={})
@@ -526,7 +522,7 @@ async def test_dns_axfr_caps_zone_records(engagement_id, monkeypatch):
         for i in range(4000)
     ]
 
-    async def fake_xfr(ns_addr, domain, timeout):  # noqa: ANN001
+    async def fake_xfr(ns_addr, domain, timeout):
         return huge
 
     monkeypatch.setattr("recon.modules.active.dns_axfr._zone_transfer", fake_xfr)

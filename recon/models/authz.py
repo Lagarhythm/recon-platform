@@ -272,6 +272,11 @@ class LivenessAttestation(UUIDPk, Base):
             "method_profile_id",
             name="uq_liveness_run_ip_method",
         ),
+        # S3: the row's existence IS the attestation - only a positive "live"
+        # outcome is ever stored. A trusted-writer fault that inserts an
+        # otherwise-FK-valid attestation with a non-positive outcome cannot
+        # stand as liveness.
+        CheckConstraint("outcome = 'live'", name="ck_liveness_outcome_live"),
         # B1: exactly one authorization reference is set.
         CheckConstraint(
             "(authorized_cidr_id IS NOT NULL) <> (authorized_target_id IS NOT NULL)",

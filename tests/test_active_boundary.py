@@ -35,7 +35,12 @@ load_builtin_modules()
 # Active modules that select network targets via the P0-2 same-run view. A
 # module here MUST call ``ctx.resolve_targets`` and MUST NOT call
 # ``ctx.known_assets`` / ``ctx.known_asset_rows``.
-_ROUTES_THROUGH_RESOLVE_TARGETS = {"port_scan"}
+#
+# ``port_scan`` was migrated onto ``resolve_targets`` in P0-2, then removed
+# entirely from the G2 active surface (Security G2 re-review, S2): a port scan
+# is a subprocess sweep that needs its own separately-checkpointed method
+# profile. It selects no target and execs nothing today - see _NON_TARGET_ACTIVE.
+_ROUTES_THROUGH_RESOLVE_TARGETS: set[str] = set()
 
 # Active modules still selecting targets through the legacy Asset/Evidence
 # readers. Migration onto resolve_targets + the permit boundary is G2 (gated on
@@ -48,8 +53,10 @@ _LEGACY_TARGET_READERS_PENDING_G2 = {
     "scan_diff",
 }
 
-# Active modules that do not select network targets at all (pure correlation).
-_NON_TARGET_ACTIVE = {"cve_correlate"}
+# Active modules that do not select network targets at all: ``cve_correlate`` is
+# pure correlation; ``port_scan`` is deferred out of G2 and only records a
+# SKIPPED/unverified_targets until its own method profile is approved.
+_NON_TARGET_ACTIVE = {"cve_correlate", "port_scan"}
 
 _LEGACY_READERS = ("known_assets", "known_asset_rows", "known_values")
 

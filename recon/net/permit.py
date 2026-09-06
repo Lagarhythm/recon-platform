@@ -41,6 +41,21 @@ class PermitError(RuntimeError):
     single-use permit - or when a permit is constructed outside the resolver."""
 
 
+class PermitRevokedError(PermitError):
+    """The authorization snapshot backing this permit was revoked or superseded
+    between mint and dispatch (F8 / Q2).
+
+    Distinct from a plain :class:`PermitError` so the caller can record a
+    ``cancelled`` disposition - a revoked authorization is not the same as an
+    out-of-scope target, and conflating them degrades forensic interpretation.
+    ``reason`` is ``"revoked"`` or ``"superseded"``.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class ActiveTargetPermit:
     destination_ip: str

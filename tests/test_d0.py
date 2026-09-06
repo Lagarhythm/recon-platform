@@ -40,6 +40,7 @@ engagement:
 scope:
   in_scope:
     domains: ["example.com", "*.example.com"]
+    cidrs: ["203.0.113.0/24"]
     hosts: ["app.example.com"]
   excluded:
     hosts: ["evil.example.com"]
@@ -211,6 +212,22 @@ async def test_refused_connect_audits_no_response_no_attestation(_engagement_id)
         audit = (await s.execute(select(AddressAudit).where(
             AddressAudit.scan_run_id == run_id))).scalar_one()
     assert audit.outcome is AddressOutcome.NO_RESPONSE
+
+
+async def test_poisoned_answer_outside_authorized_cidr_mints_nothing(_engagement_id):
+    # the hostname is an exact in_scope.host, but this run's DNS answer points at
+    # an IP in no in-scope CIDR (a poisoned / hijacked A record). getpeername
+    # defeats a post-connect rebind; it does not authenticate the answer (Q1).
+    ex = _FakeExecutor({})
+    run_id, result = await _drive(
+        _engagement_id, answers={_HOST: {"198.51.100.9"}}, executor=ex
+    )
+    assert ex.calls == []
+    assert result.attestation_ids == []
+    async with session_scope() as s:
+        atts = (await s.execute(select(LivenessAttestation).where(
+            LivenessAttestation.scan_run_id == run_id))).scalars().all()
+    assert atts == []
 
 
 async def test_max_addresses_per_run_caps_binding(_engagement_id, monkeypatch):

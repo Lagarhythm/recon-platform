@@ -230,7 +230,6 @@ async def drive_d0(
             kill_switch=kill_switch,
             is_cancelled=cancel,
             predispatch_check=predispatch,
-            command_runner=boundary.run_command,
         )
         result = await run_d0_connect_bind(
             session,

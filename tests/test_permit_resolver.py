@@ -12,19 +12,16 @@ import pytest
 from recon.core.active_policy import BOOTSTRAP_POLICY
 from recon.db import session_scope
 from recon.models.authz import (
-    DNS_CONNECT_BIND_V1,
     AuthorizationSnapshot,
+    AuthorizedCidr,
     AuthorizedTarget,
-    LivenessAttestation,
 )
 from recon.models.enums import ScopeStatus
-from recon.models.evidence import Evidence
 from recon.models.scanrun import ScanModuleRun, ScanRun
 from recon.models.user import User
-from recon.net.permit import PermitError, is_genuine_permit
+from recon.net.permit import PermitError, PermitRevokedError, is_genuine_permit
 from recon.orchestrator.permit_resolver import (
     ActivePermitResolver,
-    canonical_probe_hash,
     make_predispatch_check,
 )
 
@@ -95,6 +92,16 @@ async def _seed(session, engagement_id: str, *, revoked: bool = False) -> dict:
         source="roe_host",
     )
     session.add(target)
+    # Q1: the snapshot records the checkpoint-acknowledged address space so D0
+    # can verify a resolved IP is inside it, not merely resolved from the name.
+    cidr = AuthorizedCidr(
+        snapshot_id=snap.id,
+        cidr="203.0.113.0/24",
+        ip_version=4,
+        address_count=256,
+        source="roe_cidr",
+    )
+    session.add(cidr)
     await session.flush()
 
     return {
@@ -103,37 +110,8 @@ async def _seed(session, engagement_id: str, *, revoked: bool = False) -> dict:
         "smr_id": smr.id,
         "snapshot_id": snap.id,
         "target_id": target.id,
+        "cidr_id": cidr.id,
     }
-
-
-async def _attestation(session, ids: dict, engagement_id: str, *, observed_ip=_IP) -> str:
-    raw = {"host": _HOST, "ip": observed_ip, "port": 443}
-    ev = Evidence(
-        engagement_id=engagement_id,
-        source_module="dns",
-        scan_run_id=ids["run_id"],
-        subject_type="ip",
-        subject_value=observed_ip,
-        raw_data=raw,
-    )
-    session.add(ev)
-    await session.flush()
-    att = LivenessAttestation(
-        scan_run_id=ids["run_id"],
-        engagement_id=engagement_id,
-        evidence_id=ev.id,
-        content_hash=canonical_probe_hash(raw),
-        method_profile_id=DNS_CONNECT_BIND_V1,
-        observed_at=_TS,
-        observed_ip=observed_ip,
-        emitting_module="dns",
-        authorization_snapshot_id=ids["snapshot_id"],
-        authorized_target_id=ids["target_id"],
-        source_hostname=_HOST,
-    )
-    session.add(att)
-    await session.flush()
-    return att.id
 
 
 def _resolver(session, ids, *, dns_answers, classifier=None):
@@ -201,6 +179,16 @@ async def test_excluded_answer_is_dropped(engagement_id) -> None:
             await r.mint_dns_connect_bind_permits(_HOST)
 
 
+async def test_answer_outside_authorized_cidr_mints_nothing(engagement_id) -> None:
+    # exact authorized hostname, but a poisoned answer pointing at an IP inside
+    # no checkpoint-acknowledged CIDR (Q1).
+    async with session_scope() as session:
+        ids = await _seed(session, engagement_id)
+        r = _resolver(session, ids, dns_answers={_HOST: {"198.51.100.9"}})
+        with pytest.raises(PermitError, match="Q1"):
+            await r.mint_dns_connect_bind_permits(_HOST)
+
+
 async def test_cidr_discovery_is_disabled(engagement_id) -> None:
     async with session_scope() as session:
         ids = await _seed(session, engagement_id)
@@ -211,51 +199,10 @@ async def test_cidr_discovery_is_disabled(engagement_id) -> None:
             await r.mint_discovery_permits()
 
 
-# --- port-scan minting from an attestation ---------------------------
-
-
-async def test_mint_portscan_permit_happy_path(engagement_id) -> None:
-    async with session_scope() as session:
-        ids = await _seed(session, engagement_id)
-        att_id = await _attestation(session, ids, engagement_id)
-        r = _resolver(session, ids, dns_answers={_HOST: {_IP}})
-        permit = await r.mint_portscan_permit(att_id, argv_shape=("nmap", "__DESTINATION__"))
-    assert permit.operation == "port_scan"
-    assert permit.destination_ip == _IP
-    assert permit.liveness_attestation_id == att_id
-    assert permit.authorized_target_id == ids["target_id"]
-
-
-async def test_portscan_permit_rejects_attestation_from_another_run(engagement_id) -> None:
-    async with session_scope() as session:
-        ids = await _seed(session, engagement_id)
-        att_id = await _attestation(session, ids, engagement_id)
-        other = await _seed(session, engagement_id)
-        r = _resolver(session, other, dns_answers={_HOST: {_IP}})
-        with pytest.raises(PermitError):
-            await r.mint_portscan_permit(att_id, argv_shape=("nmap", "__DESTINATION__"))
-
-
-async def test_portscan_permit_rejects_ip_not_in_run_dns(engagement_id) -> None:
-    async with session_scope() as session:
-        ids = await _seed(session, engagement_id)
-        att_id = await _attestation(session, ids, engagement_id, observed_ip="198.51.100.5")
-        r = _resolver(session, ids, dns_answers={_HOST: {_IP}})  # 198.51.100.5 not here
-        with pytest.raises(PermitError):
-            await r.mint_portscan_permit(att_id, argv_shape=("nmap", "__DESTINATION__"))
-
-
-async def test_portscan_permit_rejects_tampered_evidence(engagement_id) -> None:
-    async with session_scope() as session:
-        ids = await _seed(session, engagement_id)
-        att_id = await _attestation(session, ids, engagement_id)
-        att = await session.get(LivenessAttestation, att_id)
-        ev = await session.get(Evidence, att.evidence_id)
-        ev.raw_data = {"host": _HOST, "ip": _IP, "port": 443, "tampered": True}
-        await session.flush()
-        r = _resolver(session, ids, dns_answers={_HOST: {_IP}})
-        with pytest.raises(PermitError):
-            await r.mint_portscan_permit(att_id, argv_shape=("nmap", "__DESTINATION__"))
+async def test_no_portscan_minter_in_g2() -> None:
+    # port scanning is out of the G2 active surface (S2); the minter is gone,
+    # not dormant - there is nothing to forge a LivenessAttestation against.
+    assert not hasattr(ActivePermitResolver, "mint_portscan_permit")
 
 
 # --- dispatch-time re-verification ----------------------------------
@@ -291,8 +238,31 @@ async def test_predispatch_rejects_after_revocation(engagement_id) -> None:
         scope_classifier=_classifier(),
         dns_answers={_HOST: {_IP}},
     )
-    with pytest.raises(PermitError):
+    with pytest.raises(PermitRevokedError) as exc_info:
         await check(permits[0])
+    assert exc_info.value.reason == "revoked"
+
+
+async def test_predispatch_rejects_supersession(engagement_id) -> None:
+    async with session_scope() as session:
+        ids = await _seed(session, engagement_id)
+        r = _resolver(session, ids, dns_answers={_HOST: {_IP}})
+        permits = await r.mint_dns_connect_bind_permits(_HOST)
+
+    async with session_scope() as session:
+        other = await _seed(session, engagement_id)
+        snap = await session.get(AuthorizationSnapshot, ids["snapshot_id"])
+        snap.superseded_by_id = other["snapshot_id"]
+
+    check = make_predispatch_check(
+        session_scope,
+        policy=BOOTSTRAP_POLICY,
+        scope_classifier=_classifier(),
+        dns_answers={_HOST: {_IP}},
+    )
+    with pytest.raises(PermitRevokedError) as exc_info:
+        await check(permits[0])
+    assert exc_info.value.reason == "superseded"
 
 
 async def test_predispatch_rejects_a_now_out_of_scope_destination(engagement_id) -> None:
@@ -323,3 +293,40 @@ async def test_predispatch_rejects_rebind_dns_drift(engagement_id) -> None:
     )
     with pytest.raises(PermitError):
         await check(permits[0])
+
+
+async def test_predispatch_rejects_ip_outside_authorized_cidr(engagement_id) -> None:
+    # a permit whose destination is a *current* DNS answer for the authorized
+    # hostname (rebind check passes) but is inside no checkpoint-acknowledged
+    # CIDR: the Q1 re-check at dispatch time still blocks it.
+    from recon.net.permit import mint_permit
+
+    poisoned_ip = "198.51.100.9"
+    async with session_scope() as session:
+        ids = await _seed(session, engagement_id)
+        snap = await session.get(AuthorizationSnapshot, ids["snapshot_id"])
+        forged = mint_permit(
+            destination_ip=poisoned_ip,
+            operation="dns_connect_bind",
+            method_profile_id="dns_connect_bind_v1",
+            effective_argv_shape=(),
+            scan_run_id=ids["run_id"],
+            scan_module_run_id=ids["smr_id"],
+            module_name="dns",
+            authorization_snapshot_id=snap.id,
+            authorized_cidr_id=None,
+            authorized_target_id=ids["target_id"],
+            parent_authorized_cidr=None,
+            source_hostname=_HOST,
+            checkpoint_ack_hash=snap.checkpoint_ack_hash,
+            policy_version=snap.policy_version,
+            liveness_attestation_id=None,
+        )
+    check = make_predispatch_check(
+        session_scope,
+        policy=BOOTSTRAP_POLICY,
+        scope_classifier=_classifier(),
+        dns_answers={_HOST: {poisoned_ip}},
+    )
+    with pytest.raises(PermitError, match="Q1"):
+        await check(forged)

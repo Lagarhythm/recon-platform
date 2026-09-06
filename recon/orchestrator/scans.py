@@ -400,9 +400,11 @@ class ScanService:
 
         # D0 authorizes EXACT in-scope hostnames only (no domain-apex implicit
         # authorization - Security B1). CIDR discovery profiles are disabled.
-        # With neither, there is no active-scan surface to snapshot; port_scan
-        # keeps its legacy same-run target path (F6 - the domain-scoped-RoE
-        # port-scan authorization question is a product decision for Security).
+        # With no exact in-scope host there is no active-scan surface to
+        # snapshot and D0 does not run. This is safe only because every enabled
+        # G2 active consumer fails closed without a snapshot: port_scan is out
+        # of the G2 surface and records SKIPPED/unverified_targets regardless
+        # (Security G2 re-review, S1/S2).
         if not roe.scope.in_scope.hosts:
             return
 

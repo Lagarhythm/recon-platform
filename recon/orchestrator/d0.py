@@ -4,15 +4,22 @@ Runs once, after the passive ``dns`` module and before the active modules, for a
 run that passed the active checkpoint. For every exact in-scope hostname that
 this run's DNS actually resolved:
 
-1. the resolver mints one connect-bind permit per distinct resolved IP;
+1. the resolver mints one connect-bind permit per distinct resolved IP, but
+   only for an IP that falls inside a checkpoint-acknowledged ``AuthorizedCidr``
+   (or an exact snapshot-owned IP target) - a poisoned answer pointing outside
+   the acknowledged address space binds nothing (Q1);
 2. the executor makes one rate-limited TCP connect to the single policy port and
    verifies ``getpeername()`` == the permitted IP (rebind / redirect defence);
 3. a completed connect writes hashed ``live_host`` Evidence + a
    :class:`~recon.models.authz.LivenessAttestation` + an ``AddressAudit(live)``;
-   a miss writes ``AddressAudit(no_response|error|excluded)`` and no attestation.
+   a miss writes ``AddressAudit(no_response|error|excluded)``, a snapshot
+   revoked/superseded between mint and dispatch writes ``AddressAudit(cancelled)``,
+   and none of those write an attestation.
 
-``port_scan`` then draws its permit from each attestation via
-``mint_portscan_permit``. Plain DNS evidence never becomes attested liveness.
+The ``LivenessAttestation`` is a forensic record. Port scanning is out of the
+G2 active surface (Security G2 re-review, S2), so nothing in G2 consumes an
+attestation to mint a downstream permit. Plain DNS evidence never becomes
+attested liveness.
 
 CIDR discovery is not handled here - it is disabled in ``BOOTSTRAP_POLICY``.
 """
@@ -42,7 +49,7 @@ from recon.models.enums import AddressOutcome
 from recon.models.evidence import Evidence
 from recon.models.scanrun import ScanModuleRun, ScanRun
 from recon.net.active_executor import ActiveExecutor
-from recon.net.permit import PermitError
+from recon.net.permit import PermitError, PermitRevokedError
 from recon.net.rate_limit import RateLimiter
 from recon.orchestrator.killswitch import kill_switch
 from recon.orchestrator.permit_resolver import (
@@ -173,12 +180,15 @@ async def _probe_one(session, run, snapshot, target, permit, executor, result) -
     try:
         probe = await executor.run(permit)
     except PermitError as exc:
-        # dispatch-time rejection (rebind, revoked, out of scope, kill switch).
-        outcome = (
-            AddressOutcome.CANCELLED
-            if kill_switch.is_engaged
-            else AddressOutcome.EXCLUDED
-        )
+        # dispatch-time rejection (rebind, revoked/superseded, out of scope,
+        # kill switch). A revoked/superseded authorization or an engaged kill
+        # switch is a CANCELLED disposition - the operation was permitted and
+        # then withdrawn; an out-of-scope / rebind destination is EXCLUDED
+        # (F8 / Q2).
+        if isinstance(exc, PermitRevokedError) or kill_switch.is_engaged:
+            outcome = AddressOutcome.CANCELLED
+        else:
+            outcome = AddressOutcome.EXCLUDED
         audit = await _write_audit(
             session, run, snapshot, target, permit.destination_ip, outcome,
             permit_id=permit.permit_id, started_at=started, detail=str(exc)[:500],

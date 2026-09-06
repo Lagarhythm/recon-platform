@@ -246,6 +246,10 @@ def upgrade() -> None:
             name="uq_liveness_run_ip_method",
         ),
         sa.CheckConstraint(
+            "outcome = 'live'",
+            name="ck_liveness_outcome_live",
+        ),
+        sa.CheckConstraint(
             "(authorized_cidr_id IS NOT NULL) <> (authorized_target_id IS NOT NULL)",
             name="ck_liveness_exactly_one_authz_ref",
         ),

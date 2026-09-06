@@ -16,9 +16,15 @@ Before any traffic, every call:
 4. acquires a rate-limiter token.
 
 Only then is the probe built - from ``permit.destination_ip`` (a canonical IP),
-never from a name - and executed. For a socket probe the actual
-``getpeername()`` peer address must equal ``permit.destination_ip`` or the
-result is discarded as a redirect / DNS-rebind attempt.
+never from a name - and executed. The actual ``getpeername()`` peer address must
+equal ``permit.destination_ip`` or the result is discarded as a redirect /
+DNS-rebind attempt.
+
+For the G2 active boundary the only dispatchable operation is the D0
+``dns_connect_bind`` TCP connect. Port scanning (a subprocess exec) is out of
+G2: it needs its own separately-checkpointed, separately-approved method profile
+(Security G2 re-review, S2). Any permit whose ``operation`` is not
+``dns_connect_bind`` is refused here before nonce consumption.
 """
 
 from __future__ import annotations
@@ -30,15 +36,7 @@ from datetime import UTC, datetime
 
 from recon.core.active_policy import active_policy
 from recon.core.netscope import NetscopeError, canonical_ip
-from recon.net import external
-from recon.net.external import CommandResult
 from recon.net.permit import ActiveTargetPermit, PermitError, is_genuine_permit
-
-# Literal token in ``effective_argv_shape`` that the executor replaces with the
-# permit's destination IP. Anything else in the shape is passed through verbatim.
-DESTINATION_TOKEN = "__DESTINATION__"
-
-CommandRunner = Callable[..., Awaitable[CommandResult]]
 
 
 @dataclass(frozen=True)
@@ -70,15 +68,11 @@ class ActiveExecutor:
         kill_switch,
         is_cancelled: Callable[[], bool | Awaitable[bool]],
         predispatch_check: Callable[[ActiveTargetPermit], Awaitable[None]],
-        command_runner: CommandRunner | None = None,
     ) -> None:
         self._rate_limiter = rate_limiter
         self._kill_switch = kill_switch
         self._is_cancelled = is_cancelled
         self._predispatch_check = predispatch_check
-        #: ``None`` -> resolve ``recon.net.external.run_command`` at call time
-        #: (so a test monkeypatching that name is honoured).
-        self._command_runner = command_runner
         self._consumed_nonces: set[str] = set()
 
     async def run(self, permit: object) -> ProbeResult:
@@ -89,6 +83,16 @@ class ActiveExecutor:
                 f"{type(permit).__name__}"
             )
         assert isinstance(permit, ActiveTargetPermit)  # narrows for type-checkers
+
+        # G2 enabled surface is D0 connect-bind ONLY. A port-scan (or any
+        # subprocess) operation needs its own separately-checkpointed,
+        # separately-approved profile (Security G2 re-review S2); until that
+        # exists there is no dispatchable operation here except the connect-bind.
+        if permit.operation != "dns_connect_bind":
+            raise PermitError(
+                f"operation {permit.operation!r} is not dispatchable in the G2 "
+                "active boundary; only dns_connect_bind is enabled"
+            )
 
         # 2. not expired, nonce not already spent.
         if permit.is_expired:
@@ -125,10 +129,7 @@ class ActiveExecutor:
         policy = active_policy(permit.policy_version)
         started = _utcnow()
         try:
-            if permit.operation == "dns_connect_bind":
-                result = await self._connect_bind(permit, policy, started)
-            else:
-                result = await self._subprocess_probe(permit, policy, started)
+            result = await self._connect_bind(permit, policy, started)
         except PermitError:
             raise
         except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
@@ -212,38 +213,6 @@ class ActiveExecutor:
             ended_at=_utcnow(),
         )
 
-    async def _subprocess_probe(
-        self, permit: ActiveTargetPermit, policy, started: datetime
-    ) -> ProbeResult:
-        argv = self._build_argv(permit)
-        runner = self._command_runner or external.run_command
-        result = await runner(argv, timeout=policy.subprocess_timeout_seconds)
-        outcome = "completed" if not result.timed_out else "timeout"
-        return ProbeResult(
-            permit_id=permit.permit_id,
-            operation=permit.operation,
-            method_profile_id=permit.method_profile_id,
-            destination_ip=permit.destination_ip,
-            dispatched=True,
-            outcome=outcome,
-            detail=f"exit={result.returncode} timed_out={result.timed_out}",
-            started_at=started,
-            ended_at=_utcnow(),
-            raw={"stdout": result.stdout, "stderr": result.stderr},
-        )
-
-    def _build_argv(self, permit: ActiveTargetPermit) -> list[str]:
-        shape = permit.effective_argv_shape
-        if not shape:
-            raise PermitError("permit has an empty effective_argv_shape")
-        if DESTINATION_TOKEN in shape:
-            return [
-                permit.destination_ip if part == DESTINATION_TOKEN else part
-                for part in shape
-            ]
-        # No explicit slot -> destination is the final positional arg.
-        return [*shape, permit.destination_ip]
-
 
 async def _maybe_await(value):
     if asyncio.iscoroutine(value) or isinstance(value, asyncio.Future):
@@ -251,5 +220,4 @@ async def _maybe_await(value):
     return value
 
 
-# re-export for callers building a shape
-__all__ = ["DESTINATION_TOKEN", "ActiveExecutor", "ProbeResult"]
+__all__ = ["ActiveExecutor", "ProbeResult"]

@@ -15,7 +15,6 @@ Invariant across every negative case: ``boundary.network_calls == []``.
 from __future__ import annotations
 
 import inspect
-import uuid
 
 import pytest
 from sqlalchemy import select
@@ -30,15 +29,23 @@ from recon.models.authz import (
     AuthorizationSnapshot,
     AuthorizedCidr,
     AuthorizedTarget,
+    CandidateManifest,
     LivenessAttestation,
 )
 from recon.models.enums import AddressOutcome, SkipReason
 from recon.models.evidence import Evidence
 from recon.models.scanrun import ScanRun
 from recon.net.active_executor import ActiveExecutor
-from recon.net.permit import ActiveTargetPermit, PermitError, is_genuine_permit, mint_permit
+from recon.net.permit import (
+    ActiveTargetPermit,
+    PermitError,
+    PermitRevokedError,
+    is_genuine_permit,
+    mint_permit,
+)
 from recon.orchestrator.authorization import create_active_snapshot
 from recon.orchestrator.permit_resolver import (
+    ActivePermitResolver,
     canonical_probe_hash,
     make_predispatch_check,
 )
@@ -152,6 +159,16 @@ def _boundary_source() -> str:
     )
 
 
+def _assert_no_portscan_consumer() -> None:
+    """Port scanning is out of the G2 active surface (Security G2 re-review, S2):
+    a ``LivenessAttestation`` has no consumer that turns it into a downstream
+    permit, so a forged / stale / cross-run attestation is inert. The minter is
+    gone entirely - not dormant - so there is nothing to forge against."""
+    assert not hasattr(ActivePermitResolver, "mint_portscan_permit")
+    src = _boundary_source()
+    assert 'operation="port_scan"' not in src and "operation='port_scan'" not in src
+
+
 # --------------------------------------------------------------------------
 # 1. unsafe / out-of-scope inputs never reach a network syscall
 # --------------------------------------------------------------------------
@@ -219,9 +236,9 @@ async def test_abuse_1_injected_liveness_evidence_does_not_authorize_a_probe(
             await session.execute(select(LivenessAttestation).where(LivenessAttestation.scan_run_id == run.id))
         ).scalars().all()
         assert atts == []
-        # no attestation id exists to mint against
-        with pytest.raises(PermitError):
-            await resolver.mint_portscan_permit(str(uuid.uuid4()), argv_shape=("nmap", "__DESTINATION__"))
+        # the fabricated live_host Evidence has no consumer: D0 only reads
+        # dns_record Evidence, and there is no port-scan minter in G2.
+        assert not hasattr(resolver, "mint_portscan_permit")
     assert boundary.network_calls == []
 
 
@@ -344,12 +361,18 @@ async def test_abuse_4_cidr_discovery_entry_points_all_raise(active_engagement, 
         with pytest.raises(PermitError):
             await resolver.mint_discovery_permits()
 
-        # the checkpoint snapshot never materialises a CIDR authorization row,
-        # even though the RoE has an in-scope CIDR
+        # G2 materialises the in-scope RoE CIDR as an AuthorizedCidr row for D0
+        # IP-membership checks only (Q1) - but performs no expansion, no
+        # manifest, and no discovery. No CandidateManifest is written.
         cidrs = (
             await session.execute(select(AuthorizedCidr).where(AuthorizedCidr.snapshot_id == snap.id))
         ).scalars().all()
-        assert cidrs == []
+        assert {c.cidr for c in cidrs} == {"203.0.113.0/24"}
+        assert all(c.source == "roe_cidr" for c in cidrs)
+        manifests = (
+            await session.execute(select(CandidateManifest).where(CandidateManifest.scan_run_id == run.id))
+        ).scalars().all()
+        assert manifests == []
     assert boundary.network_calls == []
 
 
@@ -358,18 +381,15 @@ async def test_abuse_4_cidr_discovery_entry_points_all_raise(active_engagement, 
 # --------------------------------------------------------------------------
 
 
-async def test_abuse_5_disallowed_method_cannot_mint(active_engagement, boundary):
+async def test_abuse_5_forged_non_allowlisted_method_attestation_is_inert(active_engagement, boundary):
     async with session_scope() as session:
         run, snap, target = await _seed_snapshot(session, active_engagement)
-        att, _ev = await _insert_attestation(
+        # a forged attestation naming a broader method than D0 ever ran
+        await _insert_attestation(
             session, run, snap, target, method_profile_id="masscan_syn_v1"
         )
-        scope = ScopeManager(await roe_for(session, active_engagement))
-        resolver = make_resolver(
-            session, run_id=run.id, snapshot_id=snap.id, dns_answers={HOST: {HOST_IP}}, scope=scope
-        )
-        with pytest.raises(PermitError):
-            await resolver.mint_portscan_permit(att.id, argv_shape=("nmap", "__DESTINATION__"))
+    # there is no consumer that turns any attestation into a downstream permit
+    _assert_no_portscan_consumer()
     assert boundary.network_calls == []
 
 
@@ -399,64 +419,42 @@ async def test_abuse_5_max_addresses_per_run_is_enforced(active_engagement, boun
 
 
 # --------------------------------------------------------------------------
-# 6. forged / stale / passive liveness cannot mint a port-scan permit
+# 6. forged / stale / passive liveness cannot produce traffic
+#    (port scanning is out of G2 - a LivenessAttestation has NO consumer that
+#    turns it into a downstream permit, so every forgery class below is inert)
 # --------------------------------------------------------------------------
 
 
-async def test_abuse_6_valid_same_run_attestation_mints_exactly_one_permit(active_engagement, boundary):
+async def test_abuse_6_a_liveness_attestation_has_no_downstream_consumer(active_engagement, boundary):
     async with session_scope() as session:
         run, snap, target = await _seed_snapshot(session, active_engagement)
+        # a perfectly valid same-run attestation
         att, _ev = await _insert_attestation(session, run, snap, target)
-        scope = ScopeManager(await roe_for(session, active_engagement))
-        resolver = make_resolver(
-            session, run_id=run.id, snapshot_id=snap.id, dns_answers={HOST: {HOST_IP}}, scope=scope
-        )
-        permit = await resolver.mint_portscan_permit(att.id, argv_shape=("nmap", "__DESTINATION__"))
-    assert permit.operation == "port_scan"
-    assert permit.destination_ip == HOST_IP
-    assert permit.liveness_attestation_id == att.id
-    assert boundary.network_calls == []  # minting is not dispatch
-
-
-async def test_abuse_6_tampered_evidence_is_rejected(active_engagement, boundary):
-    async with session_scope() as session:
-        run, snap, target = await _seed_snapshot(session, active_engagement)
-        att, ev = await _insert_attestation(session, run, snap, target)
-        ev.raw_data = {**ev.raw_data, "tampered": True}
-        await session.flush()
-        scope = ScopeManager(await roe_for(session, active_engagement))
-        resolver = make_resolver(
-            session, run_id=run.id, snapshot_id=snap.id, dns_answers={HOST: {HOST_IP}}, scope=scope
-        )
-        with pytest.raises(PermitError):
-            await resolver.mint_portscan_permit(att.id, argv_shape=("nmap", "__DESTINATION__"))
+        assert att.outcome == "live"
+    _assert_no_portscan_consumer()
     assert boundary.network_calls == []
 
 
-async def test_abuse_6_attestation_from_another_run_is_rejected(active_engagement, boundary):
+async def test_abuse_6_non_live_outcome_attestation_is_refused_by_the_db(active_engagement):
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        async with session_scope() as session:
+            run, snap, target = await _seed_snapshot(session, active_engagement)
+            await _insert_attestation(session, run, snap, target, outcome="dead")
+
+
+async def test_abuse_6_forged_attestation_variants_are_all_inert(active_engagement, boundary):
+    # tampered evidence, a stale observed_ip, and a cross-run attestation: each
+    # persists as an FK-valid row, and each is inert because nothing consumes an
+    # attestation in the G2 surface.
     async with session_scope() as session:
         run_a, snap_a, target_a = await _seed_snapshot(session, active_engagement)
-        att, _ev = await _insert_attestation(session, run_a, snap_a, target_a)
-        run_b, snap_b, _target_b = await _seed_snapshot(session, active_engagement)
-        scope = ScopeManager(await roe_for(session, active_engagement))
-        resolver_b = make_resolver(
-            session, run_id=run_b.id, snapshot_id=snap_b.id, dns_answers={HOST: {HOST_IP}}, scope=scope
-        )
-        with pytest.raises(PermitError):
-            await resolver_b.mint_portscan_permit(att.id, argv_shape=("nmap", "__DESTINATION__"))
-    assert boundary.network_calls == []
-
-
-async def test_abuse_6_observed_ip_not_in_this_run_dns_is_rejected(active_engagement, boundary):
-    async with session_scope() as session:
-        run, snap, target = await _seed_snapshot(session, active_engagement)
-        att, _ev = await _insert_attestation(session, run, snap, target, observed_ip="203.0.113.55")
-        scope = ScopeManager(await roe_for(session, active_engagement))
-        resolver = make_resolver(
-            session, run_id=run.id, snapshot_id=snap.id, dns_answers={HOST: {HOST_IP}}, scope=scope
-        )
-        with pytest.raises(PermitError):
-            await resolver.mint_portscan_permit(att.id, argv_shape=("nmap", "__DESTINATION__"))
+        _att, ev = await _insert_attestation(session, run_a, snap_a, target_a)
+        ev.raw_data = {**ev.raw_data, "tampered": True}
+        await _insert_attestation(session, run_a, snap_a, target_a, observed_ip="203.0.113.55")
+        await _seed_snapshot(session, active_engagement)  # a second run's snapshot
+    _assert_no_portscan_consumer()
     assert boundary.network_calls == []
 
 
@@ -505,18 +503,13 @@ def test_abuse_7_capability_unavailable_skip_reason_exists():
     assert SkipReason.CAPABILITY_UNAVAILABLE.value == "capability_unavailable"
 
 
-async def test_abuse_7_capability_method_has_no_implicit_tcp_fallback(active_engagement, boundary):
+async def test_abuse_7_capability_method_attestation_has_no_implicit_tcp_fallback(active_engagement, boundary):
     async with session_scope() as session:
         run, snap, target = await _seed_snapshot(session, active_engagement)
         # an attestation claiming a raw-capability method - not allowlisted
-        att, _ev = await _insert_attestation(session, run, snap, target, method_profile_id="icmp_ping_v1")
-        scope = ScopeManager(await roe_for(session, active_engagement))
-        resolver = make_resolver(
-            session, run_id=run.id, snapshot_id=snap.id, dns_answers={HOST: {HOST_IP}}, scope=scope
-        )
-        with pytest.raises(PermitError):
-            await resolver.mint_portscan_permit(att.id, argv_shape=("nmap", "__DESTINATION__"))
-    # it does NOT silently fall back to dns_connect_bind_v1
+        await _insert_attestation(session, run, snap, target, method_profile_id="icmp_ping_v1")
+    # nothing consumes it, and there is no fallback to dns_connect_bind_v1
+    _assert_no_portscan_consumer()
     assert boundary.network_calls == []
 
 
@@ -564,10 +557,10 @@ async def test_abuse_8_revocation_between_mint_and_dispatch_blocks_the_syscall(
 
     ex = _bare_executor(
         predispatch_check=await _real_predispatch(active_engagement),
-        command_runner=boundary.run_command,
     )
-    with pytest.raises(PermitError):
+    with pytest.raises(PermitRevokedError) as exc_info:
         await ex.run(permit)
+    assert exc_info.value.reason == "revoked"
     assert boundary.network_calls == []
 
 
@@ -585,10 +578,10 @@ async def test_abuse_8_supersession_between_mint_and_dispatch_blocks_the_syscall
 
     ex = _bare_executor(
         predispatch_check=await _real_predispatch(active_engagement),
-        command_runner=boundary.run_command,
     )
-    with pytest.raises(PermitError):
+    with pytest.raises(PermitRevokedError) as exc_info:
         await ex.run(permit)
+    assert exc_info.value.reason == "superseded"
     assert boundary.network_calls == []
 
 
@@ -638,7 +631,6 @@ async def test_abuse_8_d0_driver_records_a_terminal_non_success_audit_on_revocat
             kill_switch=kill_switch,
             is_cancelled=lambda: False,
             predispatch_check=predispatch,
-            command_runner=boundary.run_command,
         )
         result = await run_d0_connect_bind(
             session, run=run, snapshot=snap, scope=scope,
@@ -653,7 +645,8 @@ async def test_abuse_8_d0_driver_records_a_terminal_non_success_audit_on_revocat
             await s.execute(select(AddressAudit).where(AddressAudit.scan_run_id == run_id))
         ).scalars().all()
     assert len(audits) == 1
-    assert audits[0].outcome in {AddressOutcome.EXCLUDED, AddressOutcome.CANCELLED}
+    # F8 / Q2: a revocation between mint and dispatch is CANCELLED, not EXCLUDED
+    assert audits[0].outcome is AddressOutcome.CANCELLED
     assert audits[0].liveness_attestation_id is None
 
 

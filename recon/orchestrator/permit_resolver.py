@@ -6,15 +6,18 @@ For P0-1 the only wired mechanism is **D0** (``dns_connect_bind_v1``):
 * :meth:`ActivePermitResolver.mint_dns_connect_bind_permits` - a hostname is
   eligible only if it is an *exact* ``AuthorizedTarget(target_type="hostname")``
   in the run's currently-active snapshot; one permit per distinct IP this run's
-  DNS actually returned for it, bounded by ``policy.max_addresses_per_run``.
-* :meth:`ActivePermitResolver.mint_portscan_permit` - given a
-  :class:`~recon.models.authz.LivenessAttestation` this run minted, re-verifies
-  the full chain (run, snapshot still active, evidence hash, authorization row
-  ownership, observed IP still inside the permitted binding) before minting the
-  single downstream port-scan permit for the attested IP.
+  DNS actually returned for it, **and** only for a resolved IP that falls inside
+  a checkpoint-acknowledged ``AuthorizedCidr`` (or is an exact snapshot-owned IP
+  target) - a poisoned answer pointing outside the acknowledged address space
+  mints nothing (Security G2 re-review, Q1). Bounded by
+  ``policy.max_addresses_per_run``.
 
-CIDR discovery profiles are disabled by ``BOOTSTRAP_POLICY``; every CIDR entry
-point raises :class:`~recon.net.permit.PermitError`.
+Port scanning is **out of G2**: minting a port-scan permit under the D0 profile
+would authorise a far broader nmap sweep than the operator acknowledged
+(Security G2 re-review, S2). It returns in its own separately-checkpointed
+method profile with its own resolver. CIDR discovery profiles are likewise
+disabled by ``BOOTSTRAP_POLICY``; every CIDR entry point raises
+:class:`~recon.net.permit.PermitError`.
 
 :func:`make_predispatch_check` builds the dispatch-time re-verification callable
 the :class:`~recon.net.active_executor.ActiveExecutor` runs immediately before it
@@ -39,11 +42,14 @@ from recon.models.authz import (
     AuthorizationSnapshot,
     AuthorizedCidr,
     AuthorizedTarget,
-    LivenessAttestation,
 )
 from recon.models.enums import ScopeStatus
-from recon.models.evidence import Evidence
-from recon.net.permit import ActiveTargetPermit, PermitError, mint_permit
+from recon.net.permit import (
+    ActiveTargetPermit,
+    PermitError,
+    PermitRevokedError,
+    mint_permit,
+)
 
 DnsAnswers = Mapping[str, set[str]]
 
@@ -57,6 +63,51 @@ def canonical_probe_hash(payload: object) -> str:
         payload, sort_keys=True, separators=(",", ":"), default=str
     ).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+async def snapshot_authorizes_ip(
+    session: AsyncSession, snapshot_id: str, ip: str
+) -> bool:
+    """True iff canonical ``ip`` falls inside one of the snapshot's
+    checkpoint-acknowledged ``AuthorizedCidr`` networks, or equals an exact
+    snapshot-owned ``AuthorizedTarget(target_type="ip")``.
+
+    This is the Q1 check: an exact authorized hostname is authority to
+    connect-bind only after its *resolved address* is itself independently
+    covered by the acknowledged address space - ``getpeername`` stops a
+    post-connect rebind, it does not authenticate the A answer.
+    """
+    try:
+        canon = canonical_ip(ip)
+    except NetscopeError:
+        return False
+
+    exact_ip = (
+        await session.execute(
+            select(AuthorizedTarget.id).where(
+                AuthorizedTarget.snapshot_id == snapshot_id,
+                AuthorizedTarget.target_type == "ip",
+                AuthorizedTarget.value == canon,
+            )
+        )
+    ).first()
+    if exact_ip is not None:
+        return True
+
+    cidrs = (
+        await session.execute(
+            select(AuthorizedCidr.cidr).where(
+                AuthorizedCidr.snapshot_id == snapshot_id
+            )
+        )
+    ).scalars().all()
+    for cidr in cidrs:
+        try:
+            if contains(cidr, canon):
+                return True
+        except NetscopeError:
+            continue
+    return False
 
 
 class ActivePermitResolver:
@@ -161,6 +212,10 @@ class ActivePermitResolver:
             decision = self._classify(hostname, resolved_ips=[ip])
             if getattr(decision, "status", None) is ScopeStatus.EXCLUDED:
                 continue
+            # Q1: the resolved address must itself be inside the acknowledged
+            # address space, not merely resolved-from an authorized name.
+            if not await snapshot_authorizes_ip(self._session, snap.id, ip):
+                continue
             permits.append(
                 mint_permit(
                     destination_ip=ip,
@@ -182,128 +237,17 @@ class ActivePermitResolver:
             )
         if not permits:
             raise PermitError(
-                f"every DNS answer for {hostname!r} is excluded or unparseable"
+                f"every DNS answer for {hostname!r} is excluded, unparseable, or "
+                "outside the checkpoint-acknowledged address space (Q1)"
             )
         return permits
 
-    # -- port scan (from a liveness attestation) ------------------------
-
-    async def mint_portscan_permit(
-        self, attestation_id: str, *, argv_shape: tuple[str, ...]
-    ) -> ActiveTargetPermit:
-        if not argv_shape:
-            raise PermitError("port-scan permit requires a non-empty argv_shape")
-
-        att = await self._session.get(LivenessAttestation, attestation_id)
-        if att is None:
-            raise PermitError(f"liveness attestation {attestation_id} not found")
-        if att.scan_run_id != self._scan_run_id:
-            raise PermitError(
-                f"attestation {att.id} belongs to run {att.scan_run_id}, not "
-                f"{self._scan_run_id}"
-            )
-        if att.authorization_snapshot_id != self._snapshot_id:
-            raise PermitError(
-                f"attestation {att.id} snapshot {att.authorization_snapshot_id} "
-                f"!= resolver snapshot {self._snapshot_id}"
-            )
-
-        snap = await self._load_active_snapshot()
-
-        if not self._policy.allows_method(att.method_profile_id):
-            raise PermitError(
-                f"attestation method {att.method_profile_id!r} not in policy "
-                f"{self._policy.version} allowlist"
-            )
-
-        cidr_set = att.authorized_cidr_id is not None
-        target_set = att.authorized_target_id is not None
-        if cidr_set == target_set:
-            raise PermitError(
-                f"attestation {att.id} does not carry exactly one authorization "
-                "reference"
-            )
-
-        try:
-            observed_ip = canonical_ip(att.observed_ip)
-        except NetscopeError as exc:
-            raise PermitError(
-                f"attestation {att.id} observed_ip is not canonical: {exc}"
-            ) from exc
-
-        # evidence integrity: the attestation must point at unmodified evidence.
-        ev = await self._session.get(Evidence, att.evidence_id)
-        if ev is None:
-            raise PermitError(f"attestation {att.id} evidence row is missing")
-        if att.content_hash and canonical_probe_hash(ev.raw_data) != att.content_hash:
-            raise PermitError(
-                f"attestation {att.id} content_hash does not match its evidence"
-            )
-
-        if cidr_set:
-            row = await self._session.get(AuthorizedCidr, att.authorized_cidr_id)
-            if row is None or row.snapshot_id != att.authorization_snapshot_id:
-                raise PermitError(
-                    f"attestation {att.id} authorized_cidr_id does not resolve to "
-                    "a row in its own snapshot"
-                )
-            if not att.parent_authorized_cidr or row.cidr != att.parent_authorized_cidr:
-                raise PermitError(
-                    f"attestation {att.id} parent_authorized_cidr does not match "
-                    "its authorization row"
-                )
-            if not contains(row.cidr, observed_ip):
-                raise PermitError(
-                    f"attested IP {observed_ip} is not inside authorized CIDR "
-                    f"{row.cidr}"
-                )
-            authorized_cidr_id = row.id
-            authorized_target_id = None
-            parent_authorized_cidr = row.cidr
-            source_hostname = None
-        else:
-            row = await self._session.get(
-                AuthorizedTarget, att.authorized_target_id
-            )
-            if row is None or row.snapshot_id != att.authorization_snapshot_id:
-                raise PermitError(
-                    f"attestation {att.id} authorized_target_id does not resolve "
-                    "to a row in its own snapshot"
-                )
-            if not att.source_hostname or row.value != att.source_hostname:
-                raise PermitError(
-                    f"attestation {att.id} source_hostname does not match its "
-                    "authorization row"
-                )
-            if observed_ip not in {
-                _safe_canon(a) for a in self._dns_answers.get(row.value, set())
-            }:
-                raise PermitError(
-                    f"attested IP {observed_ip} was not a DNS answer for "
-                    f"{row.value!r} this run"
-                )
-            authorized_cidr_id = None
-            authorized_target_id = row.id
-            parent_authorized_cidr = None
-            source_hostname = row.value
-
-        return mint_permit(
-            destination_ip=observed_ip,
-            operation="port_scan",
-            method_profile_id=att.method_profile_id,
-            effective_argv_shape=tuple(argv_shape),
-            scan_run_id=self._scan_run_id,
-            scan_module_run_id=self._scan_module_run_id,
-            module_name=self._module_name,
-            authorization_snapshot_id=snap.id,
-            authorized_cidr_id=authorized_cidr_id,
-            authorized_target_id=authorized_target_id,
-            parent_authorized_cidr=parent_authorized_cidr,
-            source_hostname=source_hostname,
-            checkpoint_ack_hash=snap.checkpoint_ack_hash,
-            policy_version=snap.policy_version,
-            liveness_attestation_id=att.id,
-        )
+    # -- port scan: OUT of G2 ------------------------------------------
+    # A port-scan permit minted under the D0 profile authorised a far broader
+    # nmap sweep than the operator acknowledged (Security G2 re-review, S2).
+    # Port scanning returns in its own separately-checkpointed method profile
+    # with its own resolver carrying the S3 liveness-semantics checks. There is
+    # deliberately no consumer of a LivenessAttestation in the G2 surface.
 
     # -- CIDR discovery: disabled for P0-1 -----------------------------
 
@@ -341,7 +285,10 @@ def make_predispatch_check(
 ) -> Callable[[ActiveTargetPermit], Awaitable[None]]:
     """Return an async ``check(permit)`` that re-loads the authorization rows and
     re-runs the B1 invariants immediately before dispatch. Any failure raises
-    :class:`PermitError` and the executor sends nothing."""
+    :class:`PermitError` and the executor sends nothing; a snapshot revoked or
+    superseded between mint and dispatch raises :class:`PermitRevokedError` (a
+    subclass) so the caller can record a ``cancelled`` disposition rather than
+    conflating it with an out-of-scope target (F8 / Q2)."""
 
     async def check(permit: ActiveTargetPermit) -> None:
         if permit.policy_version != policy.version:
@@ -355,9 +302,15 @@ def make_predispatch_check(
             )
             if snap is None:
                 raise PermitError("authorization snapshot vanished before dispatch")
-            if snap.revoked_at is not None or snap.superseded_by_id is not None:
-                raise PermitError(
-                    "authorization snapshot revoked/superseded before dispatch"
+            if snap.revoked_at is not None:
+                raise PermitRevokedError(
+                    "authorization snapshot revoked before dispatch",
+                    reason="revoked",
+                )
+            if snap.superseded_by_id is not None:
+                raise PermitRevokedError(
+                    "authorization snapshot superseded before dispatch",
+                    reason="superseded",
                 )
             if snap.policy_version != permit.policy_version:
                 raise PermitError("snapshot policy_version changed before dispatch")
@@ -388,6 +341,16 @@ def make_predispatch_check(
                     raise PermitError(
                         "destination is not a current DNS answer for the "
                         "authorized hostname (possible rebind)"
+                    )
+                # Q1: re-verify the resolved address is itself inside the
+                # checkpoint-acknowledged address space, not merely resolved
+                # from an authorized name.
+                if not await snapshot_authorizes_ip(
+                    session, permit.authorization_snapshot_id, permit.destination_ip
+                ):
+                    raise PermitError(
+                        "destination is outside the checkpoint-acknowledged "
+                        "address space (Q1)"
                     )
                 decision = scope_classifier(
                     permit.source_hostname, resolved_ips=[permit.destination_ip]

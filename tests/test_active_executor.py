@@ -12,8 +12,7 @@ import pytest_asyncio
 
 from recon.core import active_policy as active_policy_mod
 from recon.core.active_policy import ActiveScanPolicy
-from recon.net.active_executor import DESTINATION_TOKEN, ActiveExecutor
-from recon.net.external import CommandResult
+from recon.net.active_executor import ActiveExecutor
 from recon.net.permit import PermitError, mint_permit
 
 pytestmark = pytest.mark.asyncio
@@ -46,20 +45,22 @@ def _make_executor(**overrides):
     return ActiveExecutor(**kwargs)
 
 
-def _cidr_permit(**overrides):
+def _bind_permit_generic(**overrides):
+    """A minted D0 connect-bind permit for the generic guard tests (expiry,
+    nonce, predispatch, cancel, kill switch, canonical IP)."""
     base = {
         "destination_ip": "203.0.113.7",
-        "operation": "host_discovery",
+        "operation": "dns_connect_bind",
         "method_profile_id": "dns_connect_bind_v1",
-        "effective_argv_shape": ("echo", DESTINATION_TOKEN),
+        "effective_argv_shape": (),
         "scan_run_id": "run-1",
         "scan_module_run_id": "smr-1",
-        "module_name": "host_discovery",
+        "module_name": "dns",
         "authorization_snapshot_id": "snap-1",
-        "authorized_cidr_id": "cidr-1",
-        "authorized_target_id": None,
-        "parent_authorized_cidr": "203.0.113.0/24",
-        "source_hostname": None,
+        "authorized_cidr_id": None,
+        "authorized_target_id": "tgt-1",
+        "parent_authorized_cidr": None,
+        "source_hostname": "host.example.com",
         "checkpoint_ack_hash": "ack",
         "policy_version": "p1",
         "liveness_attestation_id": None,
@@ -79,59 +80,59 @@ async def test_run_rejects_a_non_minted_lookalike() -> None:
 
     class Fake:
         destination_ip = "203.0.113.7"
-        operation = "host_discovery"
+        operation = "dns_connect_bind"
         dispatch_nonce = "x"
 
     with pytest.raises(PermitError):
         await ex.run(Fake())
 
 
+async def test_non_connect_bind_operation_is_refused() -> None:
+    # port scanning is out of the G2 active surface (S2): a permit whose
+    # operation is not dns_connect_bind is refused before nonce consumption.
+    ex = _make_executor()
+    permit = _bind_permit_generic(
+        operation="port_scan",
+        effective_argv_shape=("nmap", "-sV"),
+        liveness_attestation_id="att-1",
+    )
+    with pytest.raises(PermitError, match="not dispatchable"):
+        await ex.run(permit)
+
+
 async def test_expired_permit_is_refused_before_traffic() -> None:
     rl = _FakeRateLimiter()
     ex = _make_executor(rate_limiter=rl)
-    permit = _cidr_permit(expires_at=time.monotonic() - 1)
+    permit = _bind_permit_generic(expires_at=time.monotonic() - 1)
     with pytest.raises(PermitError):
         await ex.run(permit)
     assert rl.acquired == 0
 
 
-async def test_dispatch_nonce_is_single_use() -> None:
-    runs = []
-
-    async def runner(argv, **kw):
-        runs.append(argv)
-        return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
-
-    ex = _make_executor(command_runner=runner)
-    permit = _cidr_permit()
-    await ex.run(permit)
-    with pytest.raises(PermitError):
-        await ex.run(permit)
-    assert len(runs) == 1
-
-
-async def test_predispatch_failure_blocks_traffic() -> None:
+async def test_predispatch_failure_blocks_traffic(monkeypatch) -> None:
     rl = _FakeRateLimiter()
-    ran = []
+    opened = []
 
-    async def runner(argv, **kw):
-        ran.append(argv)
-        return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
+    async def _fake_open_connection(host, port):
+        opened.append((host, port))
+        raise AssertionError("must not connect")
+
+    monkeypatch.setattr("asyncio.open_connection", _fake_open_connection)
 
     async def deny(_permit):
         raise PermitError("snapshot revoked")
 
-    ex = _make_executor(rate_limiter=rl, predispatch_check=deny, command_runner=runner)
+    ex = _make_executor(rate_limiter=rl, predispatch_check=deny)
     with pytest.raises(PermitError):
-        await ex.run(_cidr_permit())
+        await ex.run(_bind_permit_generic())
     assert rl.acquired == 0
-    assert ran == []
+    assert opened == []
 
 
 async def test_cancelled_run_blocks_traffic() -> None:
     ex = _make_executor(is_cancelled=lambda: True)
     with pytest.raises(PermitError):
-        await ex.run(_cidr_permit())
+        await ex.run(_bind_permit_generic())
 
 
 async def test_kill_switch_blocks_traffic() -> None:
@@ -139,26 +140,14 @@ async def test_kill_switch_blocks_traffic() -> None:
     ks.is_engaged = True
     ex = _make_executor(kill_switch=ks)
     with pytest.raises(PermitError):
-        await ex.run(_cidr_permit())
-
-
-async def test_argv_is_built_from_destination_ip_only() -> None:
-    seen = {}
-
-    async def runner(argv, **kw):
-        seen["argv"] = argv
-        return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
-
-    ex = _make_executor(command_runner=runner)
-    await ex.run(_cidr_permit(effective_argv_shape=("nmap", "-sn", DESTINATION_TOKEN)))
-    assert seen["argv"] == ["nmap", "-sn", "203.0.113.7"]
+        await ex.run(_bind_permit_generic())
 
 
 async def test_non_canonical_destination_is_refused() -> None:
     # mint a permit then tamper is impossible (frozen); construct with a bad IP.
     ex = _make_executor()
     with pytest.raises(PermitError):
-        await ex.run(_cidr_permit(destination_ip="203.0.113.007"))
+        await ex.run(_bind_permit_generic(destination_ip="203.0.113.007"))
 
 
 # --- dns_connect_bind socket path -----------------------------------------
@@ -235,6 +224,14 @@ async def test_connect_bind_completes_when_peer_matches(_loopback_policy) -> Non
     assert result.outcome == "completed"
     assert result.peer_ip == "127.0.0.1"
     assert result.dispatched is True
+
+
+async def test_dispatch_nonce_is_single_use(_loopback_policy) -> None:
+    ex = _make_executor()
+    permit = _bind_permit()
+    await ex.run(permit)
+    with pytest.raises(PermitError, match="dispatch_nonce already consumed"):
+        await ex.run(permit)
 
 
 async def test_connect_bind_rejects_a_peer_ip_mismatch(_loopback_policy, monkeypatch) -> None:
